@@ -1,6 +1,6 @@
 [package]
 name = "lazyforge"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.89"
 description = "A lazygit-style terminal UI for GitLab and GitHub: merge/pull requests, pipelines and branches"
