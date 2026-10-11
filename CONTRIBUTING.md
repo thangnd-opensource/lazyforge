@@ -43,13 +43,13 @@ Released binaries will need a proper Developer ID signature (see ROADMAP.md).
 
 ## Making a release
 
-1. Set the new `version` in Cargo.toml, run `cargo build` so Cargo.lock follows, and commit.
-2. Tag that commit and push the tag:
+With [cargo-release](https://github.com/crate-ci/cargo-release) (`cargo install cargo-release`, once), configured in [release.toml](release.toml):
 
-   ```sh
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
+```sh
+cargo release patch             # dry run: shows what would happen, changes nothing
+cargo release patch --execute   # 0.1.0 → 0.1.1 (`minor`: 0.2.0, `major`: 1.0.0)
+```
 
-3. [.github/workflows/release.yml](.github/workflows/release.yml) checks that the tag matches the version, builds Linux (x86_64, ARM64), macOS (Apple Silicon, Intel) and Windows binaries, and attaches them, with a SHA-256 checksum each, to a **draft** release.
-4. Read the draft on GitHub (generated notes, files) and press Publish.
+On a clean `main`, this bumps `version` in Cargo.toml and Cargo.lock, runs the CI checks (fmt, clippy, tests; a failure stops it before anything is committed), commits "Release 0.1.1", tags `v0.1.1`, and pushes both. It does not publish to crates.io.
+
+Pushing the tag starts [.github/workflows/release.yml](.github/workflows/release.yml): it checks that the tag matches the version, builds Linux (x86_64, ARM64), macOS (Apple Silicon, Intel) and Windows binaries, and attaches them, with a SHA-256 checksum each, to a **draft** release. Open it under Releases, check the files and notes, and press **Publish release**.
