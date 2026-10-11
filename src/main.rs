@@ -189,6 +189,8 @@ async fn main() -> Result<()> {
         None => (None, open_picker(None)),
     };
     state.accounts = accounts;
+    // For `C` (check out a merge request or branch here) and `e` (open it in an editor).
+    state.local_repo = lazyforge::git::LocalRepo::discover();
     let session = Session {
         connect: Box::new(move |name| connect(Some(name))),
         selection_path,
@@ -199,7 +201,7 @@ async fn main() -> Result<()> {
     let terminal = ratatui::init();
     enable_mouse();
     let result = runtime::run(terminal, state, client, refresh_interval, session).await;
-    disable_mouse();
+    runtime::disable_mouse();
     ratatui::restore();
     result
 }
@@ -211,16 +213,10 @@ fn enable_mouse() {
     // or the shell would keep receiving mouse codes.
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        disable_mouse();
+        runtime::disable_mouse();
         previous(info);
     }));
-    if let Err(err) = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture) {
-        tracing::warn!(error = %err, "could not enable the mouse");
-    }
-}
-
-fn disable_mouse() {
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    runtime::enable_mouse();
 }
 
 /// `host` or `host:port`, for the header.

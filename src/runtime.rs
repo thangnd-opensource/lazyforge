@@ -1,7 +1,7 @@
 //! The event loop: waits for a key press, a finished network request or the refresh timer,
 //! feeds it to `app::update`, runs the returned command in the background, and redraws.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -79,10 +79,17 @@ pub async fn run(
             _ = ticker.tick() => Some(Action::Tick),
         };
 
-        if let Some(action) = action
-            && let Some(command) = app::update(&mut state, action)
-        {
-            execute(command, &mut client, &session, &tx);
+        match action.and_then(|action| app::update(&mut state, action)) {
+            // Needs the terminal, so it runs here rather than in `execute`.
+            Some(Command::OpenEditor(dir)) => {
+                // While the editor runs, nothing else may read the keyboard.
+                drop(events);
+                let result = open_editor(&mut terminal, &dir);
+                events = EventStream::new();
+                let _ = tx.send(Action::EditorClosed(result));
+            }
+            Some(command) => execute(command, &mut client, &session, &tx),
+            None => {}
         }
     }
     Ok(())
@@ -266,7 +273,19 @@ fn spawn(command: Command, client: &Forge, tx: &mpsc::UnboundedSender<Action>) {
                 let _ = tx.send(Action::RepositoriesLoaded { request_id, result });
             });
         }
-        Command::SwitchAccount { .. } | Command::SaveSelection(_) | Command::Batch(_) => {
+        Command::Checkout(request) => {
+            // git is blocking and can take a while (it fetches): off the async threads.
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || crate::git::checkout(&request))
+                    .await
+                    .unwrap_or_else(|err| Err(err.to_string()));
+                let _ = tx.send(Action::CheckoutFinished(result));
+            });
+        }
+        Command::SwitchAccount { .. }
+        | Command::SaveSelection(_)
+        | Command::Batch(_)
+        | Command::OpenEditor(_) => {
             tracing::error!("`execute` handles this command");
         }
         Command::OpenUrl(url) => {
@@ -277,4 +296,59 @@ fn spawn(command: Command, client: &Forge, tx: &mpsc::UnboundedSender<Action>) {
             }
         }
     }
+}
+
+pub fn enable_mouse() {
+    if let Err(err) = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture) {
+        tracing::warn!(error = %err, "could not enable the mouse");
+    }
+}
+
+pub fn disable_mouse() {
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+}
+
+/// Hands the terminal to `$VISUAL` / `$EDITOR` (opened on `dir`) and takes it back when the
+/// editor exits. A GUI editor (`code`, `zed`) returns at once.
+fn open_editor(terminal: &mut DefaultTerminal, dir: &Path) -> Result<(), String> {
+    let editor = ["VISUAL", "EDITOR"]
+        .into_iter()
+        .filter_map(|var| std::env::var(var).ok())
+        .find(|value| !value.trim().is_empty())
+        .ok_or("Set $EDITOR (for example `export EDITOR=code`) to open the repository from here")?;
+
+    disable_mouse();
+    ratatui::restore();
+    let status = editor_command(&editor, dir).status();
+    // Back to the TUI, whatever the editor did.
+    let _ = crossterm::terminal::enable_raw_mode();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen);
+    enable_mouse();
+    let _ = terminal.clear();
+
+    match status {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("{editor} exited with {status}")),
+        Err(err) => Err(format!("could not start {editor}: {err}")),
+    }
+}
+
+/// `$EDITOR` may hold arguments (`code --wait`), so it goes through the shell, like git does;
+/// the directory is passed as `$1`, never pasted into the command line.
+#[cfg(unix)]
+fn editor_command(editor: &str, dir: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("sh")
+        .arg(dir);
+    command
+}
+
+#[cfg(not(unix))]
+fn editor_command(editor: &str, dir: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("cmd");
+    command.arg("/C").arg(editor).arg(dir);
+    command
 }

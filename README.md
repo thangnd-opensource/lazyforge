@@ -84,7 +84,7 @@ lazyforge auth logout --profile work     # remove a saved token
 
 The header shows the server, your account and the repository; on the right, the three views: `1` merge/pull requests, `2` pipelines (GitHub: Actions), `3` branches. The bottom line always lists the keys that work on the current screen.
 
-Common keys: `j`/`k` (or the arrows) move, `g`/`G` jump to the first/last item of a list, `[`/`]` (or `Tab`/`Shift+Tab`) switch tabs or sections, `/` filters a list, `Enter` opens, `o` opens the current item in the browser, `r` reloads, `Esc` goes back, `s` switches account or repository, `q` quits. `Esc` never quits.
+Common keys: `j`/`k` (or the arrows) move, `g`/`G` jump to the first/last item of a list, `[`/`]` (or `Tab`/`Shift+Tab`) switch tabs or sections, `/` filters a list, `Enter` opens, `o` opens the current item in the browser, `r` reloads, `C` checks out locally, `Esc` goes back, `s` switches account or repository, `q` quits. `Esc` never quits.
 
 ### 1 · Merge / pull requests
 
@@ -141,6 +141,15 @@ The branches of the chosen repository (pick one with `s`): the default branch fi
 | `/` | Filter by branch name, commit title or author |
 
 Comparing shows what the branch changed since it left the other branch (like `git diff main...feature`): the number of commits and the changed files, in the same file list and diff viewer as a merge request. `b` picks another branch to compare with. This screen only reads.
+
+### Checking out locally
+
+Start lazyforge inside a clone of the repository (`cd ~/code/api && lazyforge`), then press `C` on a merge request, a pull request or a branch: after a confirmation, it fetches it and switches to it, so you can run and test the code. `e` then opens the repository in `$VISUAL` / `$EDITOR` (lazyforge steps aside for a terminal editor and comes back when it exits).
+
+- The clone is recognized by its remotes: one of them must point at the repository on screen.
+- A merge request uses its branch when that branch is in this repository and holds exactly the merge request's code; otherwise (a fork) it goes to a branch of its own, `mr/42` (GitLab) or `pr/42` (GitHub).
+- Your work is never touched: with uncommitted changes to tracked files, nothing happens. lazyforge never resets or forces; a local branch that already exists is only fast-forwarded, and left as it is if it has commits of its own.
+- In the Pipelines section, `C` still cancels the selected job.
 
 ### Mouse
 

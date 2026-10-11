@@ -56,6 +56,8 @@ pub struct DetailState {
     pub forge: ForgeKind,
     /// Copied from the list so the header has something to show while loading.
     pub title: String,
+    /// For checking it out (`C`) before the details have loaded.
+    pub source_branch: String,
     pub web_url: String,
     pub detail: Option<MrDetail>,
     pub loading: bool,
@@ -85,6 +87,7 @@ impl DetailState {
             reference: format!("{}{}", forge.reference_prefix(), mr.iid),
             forge,
             title: mr.title.clone(),
+            source_branch: mr.source_branch.clone(),
             web_url: mr.web_url.clone(),
             detail: None,
             loading: false,

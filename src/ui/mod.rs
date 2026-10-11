@@ -171,6 +171,9 @@ pub fn render(frame: &mut Frame, state: &AppState, view: &mut ViewState) {
     {
         branches::render_base_picker(frame, screen, view);
     }
+    if let Some(pending) = &state.pending_checkout {
+        render_checkout_popup(frame, pending);
+    }
 }
 
 /// The notice if there is one, otherwise the load error of what is on screen.
@@ -461,6 +464,55 @@ fn render_filter(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// "Check out … ?" with what will happen, so `y` is never a surprise.
+fn render_checkout_popup(frame: &mut Frame, pending: &crate::app::checkout::PendingCheckout) {
+    use crate::git::Target;
+    let request = &pending.request;
+    let steps = match &request.target {
+        Target::Branch(branch) => format!(
+            "Fetches {branch} from {} and switches to it (a local branch of that name is only fast-forwarded).",
+            request.remote
+        ),
+        Target::ChangeRequest {
+            source_branch,
+            fallback_branch,
+            ..
+        } => format!(
+            "Fetches it from {} and switches to {source_branch}, or to {fallback_branch} if it comes from a fork.",
+            request.remote
+        ),
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::raw("Check out "),
+            Span::raw(pending.label.clone()).bold(),
+        ]),
+        Line::from(vec![
+            Span::raw("in "),
+            Span::raw(format::home_relative(&request.root)).fg(Color::Cyan),
+            Span::raw("?"),
+        ]),
+        Line::from(""),
+        Line::from(steps).dark_gray(),
+        Line::from("Stops without touching anything if you have uncommitted changes.").dark_gray(),
+    ];
+    let area = frame.area();
+    let width = area.width.saturating_sub(8).min(80);
+    let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
+    // As tall as the wrapped text, so the last line (the safety note) is never cut off.
+    let rows = paragraph.line_count(width.saturating_sub(2));
+    let height = u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2);
+    let popup = detail::centered(area, width, height.min(area.height));
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    frame.render_widget(
+        paragraph.block(detail::popup_block(
+            " Checkout ".to_string(),
+            " y check out · n cancel ",
+        )),
+        popup,
+    );
+}
+
 /// On a file list next to a diff: whether the diff has the focus. `None` elsewhere.
 fn files_focus(state: &AppState) -> Option<bool> {
     if let Some(screen) = &state.branch_screen {
@@ -479,6 +531,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             ("Enter", "open"),
             ("[/]", "tab"),
             ("/", "filter"),
+            ("C", "checkout"),
             ("o", "browser"),
             ("r", "refresh"),
             ("q", "quit"),
@@ -513,6 +566,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             ("a", "approve"),
             ("c", "comment"),
             ("m", "merge"),
+            ("C", "checkout"),
             ("o", "browser"),
             ("r", "refresh"),
         ],
@@ -555,6 +609,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             ("Enter/l", "read diff"),
             ("J/K ^d/^u", "scroll"),
             ("b", "compare with…"),
+            ("C", "checkout"),
             ("o", "browser"),
             ("r", "refresh"),
             ("q", "quit"),
@@ -581,7 +636,9 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
-    let status = if let Some(detail) = &state.detail {
+    let status = if state.checking_out {
+        Some("checking out…")
+    } else if let Some(detail) = &state.detail {
         detail
             .busy
             .or(detail.ci.busy)

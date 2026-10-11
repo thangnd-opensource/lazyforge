@@ -8,6 +8,7 @@
 //! That keeps this module free of terminal and network code, so it is easy to unit test.
 
 pub mod branches;
+pub mod checkout;
 pub mod ci;
 pub mod detail;
 pub mod keymap;
@@ -20,8 +21,10 @@ use crate::forge::{
     ApiError, BranchPage, CiAction, CiSnapshot, Comparison, ForgeKind, MergeRequest, MrAction,
     MrDetail, MrList, MrPage, PipelineList, PipelinePage, ProjectId,
 };
+use crate::git::{CheckoutRequest, LocalRepo};
 use crate::selection::Selection;
 use branches::{BranchList, BranchScreen};
+use checkout::PendingCheckout;
 use ci::{CiActionKind, CiSource, CiState};
 use detail::{DetailState, Popup, Section};
 use picker::{ConnectedAccount, Picker, PickerStep};
@@ -96,6 +99,11 @@ pub struct AppState {
     pub branch_screen: Option<BranchScreen>,
     /// Profiles of the config file, for the account picker.
     pub accounts: Vec<Account>,
+    /// The git repository lazyforge was started in, for `C` (checkout) and `e` (editor).
+    pub local_repo: Option<LocalRepo>,
+    /// A checkout waiting for confirmation.
+    pub pending_checkout: Option<PendingCheckout>,
+    pub checking_out: bool,
     /// The platform → account → repository picker, drawn over everything else.
     pub picker: Option<Picker>,
     /// Set after an action changed something; the list reloads when we go back to it.
@@ -188,6 +196,14 @@ pub enum Action {
     SelectFile(usize),
     /// `b` on a branch: choose which branch to compare it with.
     PickBase,
+    /// `C`: check out the merge request or branch on screen into the local repository.
+    Checkout,
+    /// `e`: open the local repository in the editor.
+    OpenEditor,
+    /// Message for the user, or why the checkout stopped.
+    CheckoutFinished(Result<String, String>),
+    /// The editor exited (or could not start).
+    EditorClosed(Result<(), String>),
     ScrollDown(u16),
     ScrollUp(u16),
     ToggleApprove,
@@ -279,6 +295,8 @@ impl Action {
                 | Self::CiActionFinished { .. }
                 | Self::BranchesLoaded { .. }
                 | Self::ComparisonLoaded { .. }
+                | Self::CheckoutFinished(_)
+                | Self::EditorClosed(_)
                 | Self::BrowserFailed(_)
         )
     }
@@ -340,6 +358,10 @@ pub enum Command {
     },
     /// Remember the account and repository for the next start.
     SaveSelection(Selection),
+    /// Run the git commands of a checkout (in the background: they reach the network).
+    Checkout(CheckoutRequest),
+    /// Suspend the TUI and open this directory in `$VISUAL` / `$EDITOR`.
+    OpenEditor(std::path::PathBuf),
     OpenUrl(String),
     /// Several commands at once, like `Cmd.batch` in Elm.
     Batch(Vec<Command>),
@@ -379,6 +401,9 @@ impl AppState {
             branches: BranchList::default(),
             branch_screen: None,
             accounts: Vec::new(),
+            local_repo: None,
+            pending_checkout: None,
+            checking_out: false,
             picker: None,
             list_stale: false,
             should_quit: false,
@@ -411,6 +436,9 @@ impl AppState {
                 PickerStep::Repository => KeyContext::PickerSearch,
                 _ => KeyContext::Picker,
             };
+        }
+        if self.pending_checkout.is_some() {
+            return KeyContext::Confirm;
         }
         if let Some(screen) = &self.branch_screen {
             return match screen.base_picker {
@@ -586,7 +614,13 @@ pub fn update(state: &mut AppState, action: Action) -> Option<Command> {
         | Action::BranchesLoaded { .. }
         | Action::ComparisonLoaded { .. }
         | Action::BrowserFailed(_) => return handle_event(state, action),
+        Action::CheckoutFinished(result) => checkout::on_finished(state, result),
+        Action::EditorClosed(Err(message)) => state.notice = Some(Notice::error(message)),
+        Action::EditorClosed(Ok(())) => {}
         _ if state.picker.is_some() => return picker::update(state, action),
+        _ if state.pending_checkout.is_some() => return checkout::update_confirm(state, action),
+        Action::Checkout => return checkout::start(state),
+        Action::OpenEditor => return checkout::open_editor(state),
         _ if state.detail.is_some() => return detail::update(state, action),
         _ if state.pipeline_screen.is_some() => return pipelines::update_screen(state, action),
         _ if state.branch_screen.is_some() => return branches::update_screen(state, action),

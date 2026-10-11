@@ -74,6 +74,8 @@ fn list_key(key: KeyEvent, ctrl: bool) -> Option<Action> {
         KeyCode::Char('3') => Some(Action::ShowBranches),
         // Branches view: compare the selected branch with a branch of your choice.
         KeyCode::Char('b') => Some(Action::PickBase),
+        KeyCode::Char('C') => Some(Action::Checkout),
+        KeyCode::Char('e') => Some(Action::OpenEditor),
         KeyCode::Char('s') => Some(Action::OpenPicker),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::SelectNext),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::SelectPrevious),
@@ -125,6 +127,8 @@ fn detail_key(key: KeyEvent, ctrl: bool) -> Option<Action> {
         KeyCode::PageDown | KeyCode::Char(' ') => Some(Action::ScrollDown(PAGE)),
         KeyCode::PageUp => Some(Action::ScrollUp(PAGE)),
         KeyCode::Char('a') => Some(Action::ToggleApprove),
+        KeyCode::Char('C') => Some(Action::Checkout),
+        KeyCode::Char('e') => Some(Action::OpenEditor),
         KeyCode::Char('c') => Some(Action::StartComment),
         KeyCode::Char('m') => Some(Action::StartMerge),
         KeyCode::Char('o') => Some(Action::OpenInBrowser),
@@ -178,6 +182,8 @@ fn branch_key(key: KeyEvent, ctrl: bool) -> Option<Action> {
         KeyCode::Char('o') => Some(Action::OpenInBrowser),
         KeyCode::Char('r') => Some(Action::Refresh),
         KeyCode::Char('b') => Some(Action::PickBase),
+        KeyCode::Char('C') => Some(Action::Checkout),
+        KeyCode::Char('e') => Some(Action::OpenEditor),
         _ => None,
     }
 }

@@ -22,6 +22,7 @@
 - [x] Store tokens in the OS keyring (`lazyforge auth login | status | logout`)
 - [ ] OAuth device flow login (needs an OAuth application registered on each GitLab server)
 - [ ] Pagination of merge request lists (detail endpoints are already paginated)
+- [x] Check out a merge request, pull request or branch into the local clone (`C`), and open it in `$EDITOR` (`e`)
 - [x] Branches view (`3`): branches of the chosen repository with last commit, CI and open merge request; `Enter` compares a branch with the default branch
 - [ ] Browse a branch's files (tree and file contents), not only its changes; more than the 100 most recent branches
 - [x] GitHub Actions: CI (fmt, clippy, tests on Linux/macOS/Windows, MSRV) and draft releases with binaries for Linux, macOS, Windows

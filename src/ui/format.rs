@@ -34,6 +34,19 @@ pub fn shorten_middle(text: &str, max: usize) -> String {
     format!("{start}…{end}")
 }
 
+/// `/Users/me/code/api` → `~/code/api`, to keep paths short on screen.
+pub fn home_relative(path: &std::path::Path) -> String {
+    let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf());
+    match home
+        .as_deref()
+        .and_then(|home| path.strip_prefix(home).ok())
+    {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 pub fn relative_time(time: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let seconds = (now - time).num_seconds().max(0);
     let minutes = seconds / 60;
@@ -51,6 +64,22 @@ pub fn relative_time(time: DateTime<Utc>, now: DateTime<Utc>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn paths_under_home_start_with_a_tilde() {
+        use super::home_relative;
+        use std::path::Path;
+        let home = directories::BaseDirs::new()
+            .unwrap()
+            .home_dir()
+            .to_path_buf();
+        assert_eq!(home_relative(&home), "~");
+        #[cfg(unix)]
+        {
+            assert_eq!(home_relative(&home.join("code/api")), "~/code/api");
+            assert_eq!(home_relative(Path::new("/opt/repo")), "/opt/repo");
+        }
+    }
+
     #[test]
     fn shortens_the_middle() {
         use super::shorten_middle;

@@ -470,7 +470,7 @@ pub(super) fn render_popup(frame: &mut Frame, state: &DetailState) {
     }
 }
 
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
+pub(super) fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let [row] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .areas(area);
@@ -480,7 +480,7 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     cell
 }
 
-fn popup_block(title: String, hint: &'static str) -> Block<'static> {
+pub(super) fn popup_block(title: String, hint: &'static str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(Color::Yellow))
