@@ -27,6 +27,8 @@ pub struct DiffLine {
     pub new_line: Option<u32>,
     /// The line without its leading `+`, `-` or space.
     pub text: String,
+    /// `text` split by syntax color (see `highlight`); empty when not highlighted.
+    pub tokens: Vec<super::highlight::Token>,
 }
 
 pub fn parse_unified_diff(diff: &str) -> Vec<DiffLine> {
@@ -44,6 +46,7 @@ pub fn parse_unified_diff(diff: &str) -> Vec<DiffLine> {
                 old_line: None,
                 new_line: None,
                 text: raw.to_string(),
+                tokens: Vec::new(),
             });
             continue;
         }
@@ -75,6 +78,7 @@ pub fn parse_unified_diff(diff: &str) -> Vec<DiffLine> {
             old_line,
             new_line,
             text: text.to_string(),
+            tokens: Vec::new(),
         });
     }
     lines

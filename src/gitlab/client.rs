@@ -282,6 +282,37 @@ impl GitLabClient {
                 .http
                 .post(self.mr_url(project, iid, &["notes"]))
                 .json(&json!({ "body": body })),
+            MrAction::LineComment { body, position } => {
+                // A discussion with a position: GitLab's way of commenting on a diff line.
+                let refs = &position.refs;
+                let mut place = json!({
+                    "position_type": "text",
+                    "head_sha": refs.head_sha,
+                    "old_path": position.old_path,
+                    "new_path": position.new_path,
+                });
+                for (key, value) in [("base_sha", &refs.base_sha), ("start_sha", &refs.start_sha)] {
+                    if let Some(sha) = value {
+                        place[key] = json!(sha);
+                    }
+                }
+                // Unchanged lines need both numbers; added only new, removed only old.
+                if let Some(line) = position.old_line {
+                    place["old_line"] = json!(line);
+                }
+                if let Some(line) = position.new_line {
+                    place["new_line"] = json!(line);
+                }
+                self.http
+                    .post(self.mr_url(project, iid, &["discussions"]))
+                    .json(&json!({ "body": body, "position": place }))
+            }
+            MrAction::Reply {
+                body, discussion, ..
+            } => self
+                .http
+                .post(self.mr_url(project, iid, &["discussions", discussion, "notes"]))
+                .json(&json!({ "body": body })),
             MrAction::Merge { sha } => {
                 // Without `sha`, GitLab merges whatever the branch points to right now.
                 let body = match sha {
@@ -1045,5 +1076,96 @@ mod tests {
         assert_eq!(comparison.commits, 2);
         assert_eq!(comparison.files[0].added, 1);
         assert!(comparison.web_url.contains("/-/compare/"));
+    }
+
+    fn position(old_line: Option<u32>, new_line: Option<u32>) -> crate::forge::LinePosition {
+        crate::forge::LinePosition {
+            old_path: "src/a.rs".into(),
+            new_path: "src/a.rs".into(),
+            old_line,
+            new_line,
+            refs: crate::forge::DiffRefs {
+                base_sha: Some("base1".into()),
+                start_sha: Some("start1".into()),
+                head_sha: "head1".into(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn line_comments_are_positioned_discussions() {
+        let server = MockServer::start().await;
+        // An unchanged line needs both line numbers; GitLab places it with all three commits.
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v4/projects/group%2Fapi/merge_requests/42/discussions",
+            ))
+            .and(wiremock::matchers::body_partial_json(json!({
+                "body": "Why?",
+                "position": {
+                    "position_type": "text", "base_sha": "base1", "start_sha": "start1",
+                    "head_sha": "head1", "old_path": "src/a.rs", "new_path": "src/a.rs",
+                    "old_line": 7, "new_line": 9
+                }
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "d1"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let action = MrAction::LineComment {
+            body: "Why?".into(),
+            position: position(Some(7), Some(9)),
+        };
+        client_for(&server, "t")
+            .run_action("group/api", 42, &action)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_added_line_has_no_old_line() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v4/projects/group%2Fapi/merge_requests/42/discussions",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "d1"})))
+            .mount(&server)
+            .await;
+        let action = MrAction::LineComment {
+            body: "Nice".into(),
+            position: position(None, Some(9)),
+        };
+        client_for(&server, "t")
+            .run_action("group/api", 42, &action)
+            .await
+            .unwrap();
+        let sent: Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(sent["position"]["new_line"], 9);
+        assert!(sent["position"].get("old_line").is_none(), "{sent}");
+    }
+
+    #[tokio::test]
+    async fn replies_are_notes_of_the_discussion() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/api/v4/projects/group%2Fapi/merge_requests/42/discussions/abc123/notes",
+            ))
+            .and(wiremock::matchers::body_json(json!({"body": "Fixed"})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": 5})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let action = MrAction::Reply {
+            body: "Fixed".into(),
+            discussion: "abc123".into(),
+            label: "src/a.rs:9".into(),
+        };
+        client_for(&server, "t")
+            .run_action("group/api", 42, &action)
+            .await
+            .unwrap();
     }
 }

@@ -33,6 +33,9 @@ pub struct ViewState {
     base_list: ListState,
     /// Largest useful scroll offset of the detail pane drawn last, for `clamp_detail_scroll`.
     scroll_limit: Option<usize>,
+    /// Scroll offset (in rows) of a diff with a line cursor, and which file it is for.
+    diff_offset: usize,
+    diff_offset_for: Option<(usize, String)>,
     /// Where a list and its content pane were drawn last (files and diff, jobs and log),
     /// so the mouse wheel scrolls the pane under the pointer.
     panes: Option<Panes>,
@@ -539,11 +542,11 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         KeyContext::Filter => &[("Enter", "apply"), ("Esc", "clear"), ("↑/↓", "move")],
         // The Files section: what `j`/`k` do depends on the focused pane.
         KeyContext::Detail if files_focus(state) == Some(true) => &[
-            ("j/k J/K", "scroll diff"),
+            ("j/k J/K", "line"),
+            ("c", "comment on line"),
             ("h/Esc", "files"),
             ("[/]", "section"),
             ("a", "approve"),
-            ("c", "comment"),
             ("m", "merge"),
             ("o", "browser"),
         ],
@@ -597,7 +600,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             ("Esc", "cancel"),
         ],
         KeyContext::Branch if files_focus(state) == Some(true) => &[
-            ("j/k J/K ^d/^u", "scroll diff"),
+            ("j/k J/K ^d/^u", "move in diff"),
             ("h/Esc", "files"),
             ("o", "browser"),
             ("r", "refresh"),

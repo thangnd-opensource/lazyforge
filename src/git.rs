@@ -23,10 +23,11 @@ impl LocalRepo {
         Self::open(&std::env::current_dir().ok()?)
     }
 
+    /// `None` outside a git repository, which is normal: no warning is logged.
     pub fn open(dir: &Path) -> Option<Self> {
-        let root = git(dir, &["rev-parse", "--show-toplevel"]).ok()?;
+        let root = git_output(dir, &["rev-parse", "--show-toplevel"])?;
         let root = PathBuf::from(root.trim());
-        let listing = git(&root, &["remote", "-v"]).ok()?;
+        let listing = git_output(&root, &["remote", "-v"])?;
         Some(Self {
             remotes: parse_remotes(&listing),
             root,
@@ -220,6 +221,15 @@ fn git_succeeds(dir: &Path, args: &[&str]) -> bool {
     command(dir, args)
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+/// Like `git`, for questions whose "no" is a normal answer: `None`, and no warning logged.
+fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
+    let output = command(dir, args).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn command(dir: &Path, args: &[&str]) -> Command {
@@ -537,6 +547,17 @@ mod tests {
         let err = checkout(&fx.request(Target::Branch("nope".into()))).unwrap_err();
         assert!(!err.is_empty());
         assert_eq!(fx.current_branch(), "main");
+    }
+
+    #[test]
+    fn outside_a_repository_there_is_none() {
+        let dir = std::env::temp_dir().join(format!("lazyforge-no-repo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Unless the temporary directory itself is inside a repository.
+        if !git_succeeds(&dir, &["rev-parse", "--git-dir"]) {
+            assert!(LocalRepo::open(&dir).is_none());
+        }
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

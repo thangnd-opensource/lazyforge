@@ -5,14 +5,15 @@
 mod client;
 pub mod diff;
 mod error;
+pub mod highlight;
 mod models;
 pub mod trace;
 
 pub use client::{Forge, ForgeKind};
 pub use error::ApiError;
 pub use models::{
-    Approvals, Branch, BranchPage, CiAction, CiSnapshot, Comparison, Discussion, FileDiff, Job,
-    MergeRequest, MrAction, MrDetail, MrList, MrPage, Note, NotePosition, Pipeline, PipelineList,
-    PipelinePage, PipelineStatus, PipelineSummary, ProjectId, Repository, User, sort_branches,
-    sort_jobs,
+    Approvals, Branch, BranchPage, CiAction, CiSnapshot, Comparison, DiffRefs, Discussion,
+    FileDiff, Job, LinePosition, MergeRequest, MrAction, MrDetail, MrList, MrPage, Note,
+    NotePosition, Pipeline, PipelineList, PipelinePage, PipelineStatus, PipelineSummary, ProjectId,
+    Repository, User, sort_branches, sort_jobs,
 };

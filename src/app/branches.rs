@@ -36,8 +36,9 @@ pub struct BranchScreen {
     pub selected_file: usize,
     /// Scroll offset of the diff. Reset when the file changes.
     pub scroll: u16,
-    /// `j`/`k` scroll the diff instead of picking a file.
+    /// `j`/`k` move a line cursor in the diff instead of picking a file.
     pub diff_focused: bool,
+    pub diff_cursor: usize,
 }
 
 /// Choosing the branch to compare with: typing filters, ↑/↓ move, `Enter` picks.
@@ -232,6 +233,7 @@ fn open_comparison(state: &mut AppState, choose_base: bool) -> Option<Command> {
         selected_file: 0,
         scroll: 0,
         diff_focused: false,
+        diff_cursor: 0,
     };
     if choose_base {
         // Nothing to load until a branch is picked.
@@ -277,6 +279,7 @@ fn update_base_picker(state: &mut AppState, action: Action) -> Option<Command> {
             screen.selected_file = 0;
             screen.scroll = 0;
             screen.diff_focused = false;
+            screen.diff_cursor = 0;
             return Some(screen.fetch(&mut state.next_request_id));
         }
         _ => {}
@@ -294,14 +297,16 @@ pub(super) fn update_screen(state: &mut AppState, action: Action) -> Option<Comm
         screen.open_base_picker();
         return None;
     }
-    let count = screen.file_count();
-    if super::detail::file_browser_action(
-        &action,
-        &mut screen.selected_file,
-        &mut screen.scroll,
-        &mut screen.diff_focused,
-        count,
-    ) {
+    let line_count = screen.selected_file().map_or(0, |f| f.lines.len());
+    let files = super::detail::FileBrowser {
+        file_count: screen.file_count(),
+        line_count,
+        selected: &mut screen.selected_file,
+        scroll: &mut screen.scroll,
+        diff_focused: &mut screen.diff_focused,
+        cursor: &mut screen.diff_cursor,
+    };
+    if super::detail::file_browser_action(&action, files) {
         return None;
     }
     match action {
@@ -506,7 +511,7 @@ mod tests {
         update(&mut state, Action::FocusContent);
         update(&mut state, Action::SelectNext);
         let screen = state.branch_screen.as_ref().unwrap();
-        assert_eq!((screen.selected_file, screen.scroll), (1, 1));
+        assert_eq!((screen.selected_file, screen.diff_cursor), (1, 1));
         update(&mut state, Action::CloseDetail);
         assert!(!state.branch_screen.as_ref().unwrap().diff_focused);
 
