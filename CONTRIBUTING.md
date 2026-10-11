@@ -53,3 +53,15 @@ cargo release patch --execute   # 0.1.0 → 0.1.1 (`minor`: 0.2.0, `major`: 1.0.
 On a clean `main`, this bumps `version` in Cargo.toml and Cargo.lock, runs the CI checks (fmt, clippy, tests; a failure stops it before anything is committed), commits "Release 0.1.1", tags `v0.1.1`, and pushes both. It does not publish to crates.io.
 
 Pushing the tag starts [.github/workflows/release.yml](.github/workflows/release.yml): it checks that the tag matches the version, builds Linux (x86_64, ARM64), macOS (Apple Silicon, Intel) and Windows binaries, and attaches them, with a SHA-256 checksum each, to a **draft** release. Open it under Releases, check the files and notes, and press **Publish release**.
+
+## Recording the demo GIF
+
+`docs/demo.gif` is recorded from a script, against a fake GitHub server with made-up data (the "acme" organization), so it never shows real accounts or code:
+
+```sh
+brew install agg          # asciicast → GIF, once
+cargo build --release
+python3 scripts/demo/record.py
+```
+
+[scripts/demo/server.py](scripts/demo/server.py) serves the data, [scripts/demo/record.py](scripts/demo/record.py) presses the keys (edit `SCRIPT` to change the tour) and writes `docs/demo.cast` and `docs/demo.gif`. Re-record after changing how a screen looks.

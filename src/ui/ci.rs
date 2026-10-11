@@ -121,7 +121,7 @@ fn render_jobs(frame: &mut Frame, area: Rect, ci: &CiState, view: &mut ViewState
         .block(border().title(" Jobs "))
         .highlight_style(
             Style::new()
-                .bg(Color::DarkGray)
+                .bg(super::SELECTED_BG)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");

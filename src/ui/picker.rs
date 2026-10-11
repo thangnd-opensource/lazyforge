@@ -75,7 +75,7 @@ fn render_list(
     let list = List::new(items)
         .highlight_style(
             Style::new()
-                .bg(Color::DarkGray)
+                .bg(super::SELECTED_BG)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");

@@ -6,7 +6,9 @@ Works with gitlab.com, self-hosted GitLab, github.com and GitHub Enterprise.
 
 > **Status:** early development. Expect rough edges; see [ROADMAP.md](ROADMAP.md) for what's coming.
 
-<!-- TODO: screenshot / gif -->
+![lazyforge: pull requests, a diff, a failed CI job, branches](docs/demo.gif)
+
+<sub>The demo runs against a fake server with made-up data ([scripts/demo](scripts/demo)).</sub>
 
 ## Features
 

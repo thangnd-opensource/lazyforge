@@ -53,6 +53,11 @@ impl ViewState {
     }
 }
 
+/// Background of the selected row in lists and tables. A dark gray from the 256-color
+/// palette rather than `DarkGray` (color 8), which many themes also use for dimmed text:
+/// dimmed text on a `DarkGray` row (`#128`, `→`) would vanish.
+pub(crate) const SELECTED_BG: Color = Color::Indexed(237);
+
 /// Lines scrolled per mouse wheel step.
 const WHEEL_LINES: u16 = 3;
 
@@ -402,11 +407,7 @@ fn render_merge_requests(frame: &mut Frame, area: Rect, state: &AppState, view: 
         .header(header)
         .block(block)
         .column_spacing(COLUMN_SPACING)
-        .row_highlight_style(
-            Style::new()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
+        .row_highlight_style(Style::new().bg(SELECTED_BG).add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
 
     // One TableState per tab, so each tab keeps its own scroll position.

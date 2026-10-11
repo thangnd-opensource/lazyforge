@@ -96,7 +96,7 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, state: &AppState, view:
         .column_spacing(COLUMN_SPACING)
         .row_highlight_style(
             Style::new()
-                .bg(Color::DarkGray)
+                .bg(super::SELECTED_BG)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
@@ -261,7 +261,7 @@ pub(super) fn render_base_picker(frame: &mut Frame, screen: &BranchScreen, view:
     let list = List::new(items)
         .highlight_style(
             Style::new()
-                .bg(Color::DarkGray)
+                .bg(super::SELECTED_BG)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");

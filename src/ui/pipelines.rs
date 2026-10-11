@@ -103,7 +103,7 @@ pub(super) fn render_list(frame: &mut Frame, area: Rect, state: &AppState, view:
         .column_spacing(2)
         .row_highlight_style(
             Style::new()
-                .bg(Color::DarkGray)
+                .bg(super::SELECTED_BG)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
