@@ -1,0 +1,26 @@
+# Copy to ~/.config/lazyforge/config.toml (or $XDG_CONFIG_HOME/lazyforge/config.toml).
+
+# Used when --profile is not given. Optional if there is only one profile.
+default_profile = "work"
+
+# Seconds between automatic refreshes of the visible tab. 0 turns it off. Default: 120.
+refresh_interval = 120
+
+[profiles.work]
+host = "https://gitlab.example.com"   # self-hosted; sub-paths like https://example.com/gitlab work too
+# The easiest way to add a profile is `lazyforge auth login --profile work`, which stores the
+# token in the OS keychain. Alternatively, point to an environment variable:
+token_env = "GITLAB_WORK_TOKEN"
+
+[profiles.public]
+host = "https://gitlab.com"
+# token = "glpat-..."                 # plain-text token: works, but prefer token_env
+# With neither token nor token_env: the OS keychain, then GITLAB_TOKEN.
+
+[profiles.github]
+host = "https://github.com"           # the platform (GitLab or GitHub) is guessed from the host
+
+[profiles.ghe]
+host = "https://github.example.com"   # GitHub Enterprise Server
+kind = "github"                       # needed when the host does not say it is GitHub
+token_env = "GHE_TOKEN"

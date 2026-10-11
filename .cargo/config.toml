@@ -1,0 +1,4 @@
+# On macOS, sign the binary before `cargo run` so the keychain keeps recognising it across
+# rebuilds (see scripts/macos-runner.sh). Does nothing without a local signing certificate.
+[target.'cfg(target_os = "macos")']
+runner = "scripts/macos-runner.sh"

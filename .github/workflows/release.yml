@@ -1,0 +1,106 @@
+# Builds lazyforge for each platform when a version tag is pushed (`git tag v0.1.0 && git push
+# origin v0.1.0`) and attaches the archives to a *draft* GitHub release, to check and publish
+# by hand.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+# Building only reads the code; the job that creates the release asks for more below.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    name: Tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Compare the tag with the package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: check-version
+    strategy:
+      matrix:
+        include:
+          # Ubuntu 22.04's older glibc lets the Linux binaries run on more distributions.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          # Built on Apple Silicon too: Xcode's toolchain targets Intel Macs as well.
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          name="lazyforge-$TAG-$TARGET"
+          mkdir -p "dist/$name"
+          cp README.md LICENSE "dist/$name/"
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "../target/$TARGET/release/lazyforge.exe" "$name/"
+            7z a -bd "$name.zip" "$name" > /dev/null
+            archive="$name.zip"
+          else
+            cp "../target/$TARGET/release/lazyforge" "$name/"
+            tar -czf "$name.tar.gz" "$name"
+            archive="$name.tar.gz"
+          fi
+          # `shasum` exists on every runner (Linux, macOS, and Git Bash on Windows).
+          shasum -a 256 "$archive" > "$archive.sha256"
+          rm -r "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "lazyforge $TAG" \
+            --generate-notes \
+            --verify-tag \
+            --draft
