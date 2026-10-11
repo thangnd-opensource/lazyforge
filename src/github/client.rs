@@ -14,8 +14,9 @@ use super::actions::{self, RawJobs, RawRun, RawRuns};
 use super::branches::{BRANCHES_QUERY, BranchesData, RawComparison};
 use super::rest::{self, RawDetail};
 use crate::forge::{
-    ApiError, BranchPage, CiAction, CiSnapshot, Comparison, Job, MergeRequest, MrAction, MrDetail,
-    MrList, MrPage, PipelineList, PipelinePage, PipelineStatus, Repository, User, sort_jobs,
+    ApiError, BranchPage, CiAction, CiSnapshot, Comparison, Job, LinePosition, MergeRequest,
+    MrAction, MrDetail, MrList, MrPage, PipelineList, PipelinePage, PipelineStatus, Repository,
+    User, Verdict, sort_jobs,
 };
 
 /// Repositories looked at for the "Mine" and "Recent" run lists.
@@ -212,25 +213,39 @@ impl GitHubClient {
                 .post(self.repo_url(repo, &["issues", &n, "comments"])?)
                 .json(&json!({ "body": body })),
             MrAction::LineComment { body, position } => {
-                // Added and unchanged lines are on the new side, removed lines on the old.
-                let (path, line, side) = match (position.new_line, position.old_line) {
-                    (Some(line), _) => (&position.new_path, line, "RIGHT"),
-                    (None, Some(line)) => (&position.old_path, line, "LEFT"),
-                    (None, None) => {
-                        return Err(ApiError::Unsupported(
-                            "this line cannot take a comment".into(),
-                        ));
-                    }
-                };
+                let mut comment = review_comment(position, body)?;
+                comment["commit_id"] = json!(position.refs.head_sha);
                 self.http
                     .post(self.repo_url(repo, &["pulls", &n, "comments"])?)
-                    .json(&json!({
-                        "body": body,
-                        "commit_id": position.refs.head_sha,
-                        "path": path,
-                        "line": line,
-                        "side": side,
-                    }))
+                    .json(&comment)
+            }
+            MrAction::SubmitReview {
+                body,
+                verdict,
+                comments,
+            } => {
+                // One review: the verdict, the summary and every line comment, so the author
+                // gets one notification.
+                let event = match verdict {
+                    Verdict::Comment => "COMMENT",
+                    Verdict::Approve => "APPROVE",
+                    Verdict::RequestChanges => "REQUEST_CHANGES",
+                };
+                let mut review = json!({ "event": event });
+                if !body.trim().is_empty() {
+                    review["body"] = json!(body);
+                }
+                if let Some(first) = comments.first() {
+                    review["commit_id"] = json!(first.position.refs.head_sha);
+                    review["comments"] = comments
+                        .iter()
+                        .map(|c| review_comment(&c.position, &c.body))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into();
+                }
+                self.http
+                    .post(self.repo_url(repo, &["pulls", &n, "reviews"])?)
+                    .json(&review)
             }
             MrAction::Reply {
                 body, discussion, ..
@@ -536,6 +551,21 @@ impl GitHubClient {
         body.data
             .ok_or_else(|| ApiError::UnexpectedResponse("GraphQL response has no data".into()))
     }
+}
+
+/// A line comment as GitHub places it: added and unchanged lines on the new side (RIGHT),
+/// removed lines on the old one (LEFT).
+fn review_comment(position: &LinePosition, body: &str) -> Result<Value, ApiError> {
+    let (path, line, side) = match (position.new_line, position.old_line) {
+        (Some(line), _) => (&position.new_path, line, "RIGHT"),
+        (None, Some(line)) => (&position.old_path, line, "LEFT"),
+        (None, None) => {
+            return Err(ApiError::Unsupported(
+                "this line cannot take a comment".into(),
+            ));
+        }
+    };
+    Ok(json!({ "body": body, "path": path, "line": line, "side": side }))
 }
 
 /// `owner/repo` → `("owner", "repo")`.
@@ -1361,5 +1391,54 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ApiError::Unsupported(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_review_is_one_request_with_its_comments() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/repos/acme/api/pulls/42/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 9})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let draft = |old_line, new_line, body: &str| crate::forge::DraftComment {
+            position: crate::forge::LinePosition {
+                old_path: "src/a.rs".into(),
+                new_path: "src/a.rs".into(),
+                old_line,
+                new_line,
+                refs: crate::forge::DiffRefs {
+                    base_sha: None,
+                    start_sha: None,
+                    head_sha: "head1".into(),
+                },
+            },
+            body: body.into(),
+        };
+        let action = MrAction::SubmitReview {
+            body: "Two things".into(),
+            verdict: crate::forge::Verdict::RequestChanges,
+            comments: vec![
+                draft(None, Some(4), "Typo"),
+                draft(Some(9), None, "Why removed?"),
+            ],
+        };
+        client_for(&server)
+            .run_action("acme/api", 42, &action)
+            .await
+            .unwrap();
+        let sent: Value =
+            serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+        assert_eq!(
+            sent,
+            json!({
+                "event": "REQUEST_CHANGES", "body": "Two things", "commit_id": "head1",
+                "comments": [
+                    {"body": "Typo", "path": "src/a.rs", "line": 4, "side": "RIGHT"},
+                    {"body": "Why removed?", "path": "src/a.rs", "line": 9, "side": "LEFT"}
+                ]
+            })
+        );
     }
 }

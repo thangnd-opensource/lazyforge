@@ -137,7 +137,8 @@ pub fn render(frame: &mut Frame, state: &AppState, view: &mut ViewState) {
     if let Some(open) = &state.picker {
         picker::render(frame, main, state, open, view);
     } else if let Some(detail) = &state.detail {
-        detail::render(frame, main, detail, view);
+        let drafts = crate::app::review::of(&state.review_drafts, detail);
+        detail::render(frame, main, detail, drafts, view);
     } else if let Some(screen) = &state.pipeline_screen {
         pipelines::render_screen(frame, main, screen, view);
     } else if let Some(screen) = &state.branch_screen {
@@ -162,7 +163,8 @@ pub fn render(frame: &mut Frame, state: &AppState, view: &mut ViewState) {
 
     // Popups last, so they are drawn over everything else.
     if let Some(detail) = &state.detail {
-        detail::render_popup(frame, detail);
+        let drafts = crate::app::review::of(&state.review_drafts, detail);
+        detail::render_popup(frame, detail, drafts);
     }
     if let Some(screen) = &state.pipeline_screen
         && let Some(crate::app::detail::Popup::ConfirmCi(action)) = screen.popup
@@ -544,6 +546,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         KeyContext::Detail if files_focus(state) == Some(true) => &[
             ("j/k J/K", "line"),
             ("c", "comment on line"),
+            ("R", "review"),
             ("h/Esc", "files"),
             ("[/]", "section"),
             ("a", "approve"),
@@ -618,6 +621,12 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             ("q", "quit"),
         ],
         KeyContext::CommentEditor => &[("Ctrl+S", "send"), ("Esc", "close (keeps draft)")],
+        KeyContext::ReviewEditor => &[
+            ("type", "summary"),
+            ("Tab", "verdict"),
+            ("Ctrl+S", "send review"),
+            ("Esc", "close (kept)"),
+        ],
         KeyContext::Confirm => &[("y", "yes"), ("n/Esc", "cancel")],
         KeyContext::Picker => &[
             ("j/k", "move"),

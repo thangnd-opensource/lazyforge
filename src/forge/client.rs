@@ -92,6 +92,11 @@ impl ForgeKind {
         matches!(self, Self::GitLab)
     }
 
+    /// Can a review end with "request changes"? GitLab's free tier has no such state.
+    pub fn can_request_changes(self) -> bool {
+        matches!(self, Self::GitHub)
+    }
+
     /// Can a single job be canceled? GitHub only cancels whole workflow runs.
     pub fn can_cancel_jobs(self) -> bool {
         matches!(self, Self::GitLab)

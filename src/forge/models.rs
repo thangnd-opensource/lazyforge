@@ -224,6 +224,14 @@ pub enum MrAction {
         body: String,
         position: LinePosition,
     },
+    /// Line comments written as drafts, sent together with a verdict and a summary, so the
+    /// author gets one notification.
+    SubmitReview {
+        /// The summary; may be empty.
+        body: String,
+        verdict: Verdict,
+        comments: Vec<DraftComment>,
+    },
     /// A reply in a thread on a diff line.
     Reply {
         body: String,
@@ -236,6 +244,43 @@ pub enum MrAction {
     Merge {
         sha: Option<String>,
     },
+}
+
+/// How a review ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Comments only.
+    Comment,
+    Approve,
+    /// GitHub only: GitLab's free tier has no equivalent.
+    RequestChanges,
+}
+
+impl Verdict {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Comment => "Comment",
+            Self::Approve => "Approve",
+            Self::RequestChanges => "Request changes",
+        }
+    }
+}
+
+/// A line comment kept in lazyforge until the review is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftComment {
+    pub position: LinePosition,
+    pub body: String,
+}
+
+impl DraftComment {
+    /// Whether this draft is about `line` of `file`.
+    pub fn is_on(&self, file: &FileDiff, line: &super::diff::DiffLine) -> bool {
+        let position = &self.position;
+        (position.new_path == file.new_path || position.old_path == file.old_path)
+            && position.old_line == line.old_line
+            && position.new_line == line.new_line
+    }
 }
 
 /// The commits a merge request's diff is between. GitLab needs all three to place a line

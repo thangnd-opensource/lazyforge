@@ -14,6 +14,7 @@ pub mod detail;
 pub mod keymap;
 pub mod picker;
 pub mod pipelines;
+pub mod review;
 
 use crate::config::Account;
 use crate::forge::Repository;
@@ -101,6 +102,10 @@ pub struct AppState {
     pub accounts: Vec<Account>,
     /// The git repository lazyforge was started in, for `C` (checkout) and `e` (editor).
     pub local_repo: Option<LocalRepo>,
+    /// Review drafts per merge request, until sent.
+    pub review_drafts: review::Drafts,
+    /// `q` was pressed once with unsent drafts: the next `q` quits.
+    quit_armed: bool,
     /// A checkout waiting for confirmation.
     pub pending_checkout: Option<PendingCheckout>,
     pub checking_out: bool,
@@ -151,6 +156,8 @@ pub enum KeyContext {
     PickerSearch,
     /// A branch compared with the default branch: read-only, files and diffs.
     Branch,
+    /// The "finish review" popup: typing writes the summary, `Tab` changes the verdict.
+    ReviewEditor,
     /// The "compare with…" popup, where typing filters the branches.
     BranchBase,
 }
@@ -200,6 +207,14 @@ pub enum Action {
     Checkout,
     /// `e`: open the local repository in the editor.
     OpenEditor,
+    /// `Ctrl+D` in the comment editor: keep the line comment as a review draft.
+    SaveDraft,
+    /// `d` on a diff line with a draft: drop the draft.
+    DeleteDraft,
+    /// `R`: summary and verdict, then send the review.
+    StartReview,
+    /// `Tab` in the review popup: comment → approve → request changes.
+    CycleVerdict,
     /// Message for the user, or why the checkout stopped.
     CheckoutFinished(Result<String, String>),
     /// The editor exited (or could not start).
@@ -402,6 +417,8 @@ impl AppState {
             branch_screen: None,
             accounts: Vec::new(),
             local_repo: None,
+            review_drafts: review::Drafts::new(),
+            quit_armed: false,
             pending_checkout: None,
             checking_out: false,
             picker: None,
@@ -455,6 +472,7 @@ impl AppState {
         match &self.detail {
             Some(detail) => match detail.popup {
                 Some(Popup::Comment) => KeyContext::CommentEditor,
+                Some(Popup::FinishReview) => KeyContext::ReviewEditor,
                 Some(Popup::ConfirmMerge | Popup::ConfirmCi(_)) => KeyContext::Confirm,
                 None if detail.section == Section::Pipelines => KeyContext::DetailPipelines,
                 None => KeyContext::Detail,
@@ -596,9 +614,21 @@ fn matches_filter(mr: &MergeRequest, needle: &str) -> bool {
 pub fn update(state: &mut AppState, action: Action) -> Option<Command> {
     if action.is_user_input() {
         state.notice = None;
+        if !matches!(action, Action::Quit) {
+            state.quit_armed = false;
+        }
     }
     match action {
-        Action::Quit => state.should_quit = true,
+        Action::Quit => {
+            let unsent = review::total(&state.review_drafts);
+            if unsent > 0 && !std::mem::replace(&mut state.quit_armed, true) {
+                state.notice = Some(Notice::error(format!(
+                    "{unsent} review comment(s) not sent (R in their merge request sends them). q again quits anyway"
+                )));
+            } else {
+                state.should_quit = true;
+            }
+        }
         // Results and timers are handled the same way whatever screen is open.
         Action::AutoRefresh
         | Action::Tick
@@ -805,13 +835,19 @@ fn handle_event(state: &mut AppState, action: Action) -> Option<Command> {
             result,
         } => {
             // The user may have left (or opened another merge request) in the meantime.
-            let detail = state
+            let mut detail = state
                 .detail
                 .as_mut()
                 .filter(|d| d.project_path == project_path && d.iid == iid);
             match result {
                 Ok(()) => {
                     state.list_stale = true;
+                    if matches!(action, MrAction::SubmitReview { .. }) {
+                        // `state.review_drafts` and `detail` (inside `state.detail`) are
+                        // different fields: both can be borrowed at once.
+                        let drafts = &mut state.review_drafts;
+                        review::on_sent(drafts, detail.as_deref_mut(), &project_path, iid);
+                    }
                     let reference = format!("{}{iid}", state.forge.reference_prefix());
                     state.notice = Some(Notice::info(detail::success_message(&action, &reference)));
                     if let Some(detail) = detail {
@@ -830,6 +866,14 @@ fn handle_event(state: &mut AppState, action: Action) -> Option<Command> {
                 }
                 Err(err) => {
                     tracing::warn!(error = %err, ?action, "merge request action failed");
+                    // The review was published before the failure: sending its drafts again
+                    // would post them twice.
+                    if matches!(err, ApiError::PartlyDone(_))
+                        && matches!(action, MrAction::SubmitReview { .. })
+                    {
+                        let drafts = &mut state.review_drafts;
+                        review::on_sent(drafts, detail.as_deref_mut(), &project_path, iid);
+                    }
                     if let Some(detail) = detail {
                         detail.busy = None;
                     }

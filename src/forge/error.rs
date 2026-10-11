@@ -32,6 +32,11 @@ pub enum ApiError {
     #[error("{0}")]
     Unsupported(String),
 
+    /// The first part of an action went through and a later one failed (a review was
+    /// published, its approval refused): what was done must not be done again.
+    #[error("{0}")]
+    PartlyDone(String),
+
     #[error("network error: {0}")]
     Http(#[from] reqwest::Error),
 }
