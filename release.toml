@@ -1,0 +1,20 @@
+# Settings for `cargo release` (https://github.com/crate-ci/cargo-release).
+#
+#   cargo release patch             # dry run: shows what would happen, changes nothing
+#   cargo release patch --execute   # 0.1.0 → 0.1.1: bump, commit, tag v0.1.1, push
+#
+# `minor` and `major` work the same way. Pushing the tag starts .github/workflows/release.yml,
+# which builds the binaries into a draft GitHub release. See CONTRIBUTING.md.
+
+# Releases come from main only.
+allow-branch = ["main"]
+# Not on crates.io (yet): GitHub releases only.
+publish = false
+pre-release-commit-message = "Release {{version}}"
+tag-name = "v{{version}}"
+tag-message = "lazyforge {{version}}"
+# The same checks as CI, before anything is committed: a release that fails them stops here.
+pre-release-hook = [
+    "sh", "-c",
+    "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked",
+]
