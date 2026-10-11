@@ -108,8 +108,12 @@ Tabs: the chosen repository (when there is one), **Assigned**, **Review requeste
 | `h` / `←` / `Esc` | Files: back to the file list |
 | `J` / `K`, `Ctrl+d` / `Ctrl+u`, `Space` | Scroll the diff or text |
 | `a` | Approve, or remove your approval (GitLab only: on GitHub, dismiss your review on the web) |
+| `Ctrl+D` (in the comment editor) | Keep a line comment as a review draft instead of sending it; `c` on its line edits it, `d` deletes it |
+| `R` | Finish the review: a summary, a verdict (`Tab`: Comment, Approve, Request changes on GitHub), and `Ctrl+S` sends it with all its drafts at once |
 | `c` | Write a comment: `Ctrl+S` sends it, `Esc` closes and keeps the draft. In the diff, the comment goes on the line under the cursor (added, removed or unchanged), or replies to the thread already on that line |
 | `m` | Merge, after a confirmation (`y`) |
+
+A review sends its line comments together, so the author gets one notification instead of one per comment: on GitHub a single review with its verdict, on GitLab draft notes published at once (then the approval). Drafts stay in lazyforge, per merge request, until the review is sent; quitting with unsent drafts asks first. GitLab's free tier has no "request changes".
 
 Threads on diff lines appear right below their line, with a yellow bar. Comments on lines that are no longer in the diff (the branch changed since) are listed under Discussion only.
 

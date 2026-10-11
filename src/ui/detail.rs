@@ -9,11 +9,17 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 
 use super::{Panes, ViewState, ci, format, pipeline_symbol};
 use crate::app::ci::CiState;
-use crate::app::detail::{DetailState, Popup, Section};
+use crate::app::detail::{CommentTarget, DetailState, Popup, Section};
 use crate::forge::diff::DiffLineKind;
-use crate::forge::{CiAction, Discussion, FileDiff, MrDetail};
+use crate::forge::{CiAction, Discussion, DraftComment, FileDiff, MrDetail, Verdict};
 
-pub(super) fn render(frame: &mut Frame, area: Rect, state: &DetailState, view: &mut ViewState) {
+pub(super) fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &DetailState,
+    drafts: &[DraftComment],
+    view: &mut ViewState,
+) {
     let [title, sections, body] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -21,7 +27,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &DetailState, view: &
     ])
     .areas(area);
 
-    render_title(frame, title, state);
+    render_title(frame, title, state, drafts.len());
     render_sections(frame, sections, state);
 
     let Some(detail) = &state.detail else {
@@ -60,6 +66,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &DetailState, view: &
                 FilesPane {
                     files: &detail.files,
                     discussions: &detail.discussions,
+                    drafts,
                     selected: state.selected_file,
                     scroll: state.scroll,
                     cursor: state.diff_focused.then_some(state.diff_cursor),
@@ -88,7 +95,7 @@ pub(super) fn border() -> Block<'static> {
         .border_style(Style::new().fg(Color::Blue))
 }
 
-fn render_title(frame: &mut Frame, area: Rect, state: &DetailState) {
+fn render_title(frame: &mut Frame, area: Rect, state: &DetailState, drafts: usize) {
     let mut spans = vec![
         Span::raw(format!(" {} ", state.reference)).dark_gray(),
         Span::raw(state.title.clone()).bold(),
@@ -105,6 +112,9 @@ fn render_title(frame: &mut Frame, area: Rect, state: &DetailState) {
             Span::raw("  "),
             approvals_span(detail),
         ]);
+    }
+    if drafts > 0 {
+        spans.push(Span::raw(format!("  ✎ {drafts} draft(s) · R to send")).fg(Color::Magenta));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -272,6 +282,8 @@ pub(super) struct FilesPane<'a> {
     pub files: &'a [FileDiff],
     /// Threads to show under their diff lines (none for a branch comparison).
     pub discussions: &'a [Discussion],
+    /// Review drafts, shown under their lines too.
+    pub drafts: &'a [DraftComment],
     pub selected: usize,
     pub scroll: u16,
     /// The line cursor, when the diff has the focus.
@@ -284,6 +296,7 @@ pub(super) fn render_files(frame: &mut Frame, area: Rect, pane: FilesPane, view:
     let FilesPane {
         files,
         discussions,
+        drafts,
         selected,
         scroll,
         cursor,
@@ -329,7 +342,7 @@ pub(super) fn render_files(frame: &mut Frame, area: Rect, pane: FilesPane, view:
         format!(" {} ", file.new_path)
     };
     let block = diff_border.title(title);
-    let (lines, starts) = diff_with_threads(file, discussions);
+    let (lines, starts) = diff_with_threads(file, discussions, drafts);
     match cursor {
         // Lines that are only a message ("Diff too large…") have no cursor.
         Some(cursor) if !starts.is_empty() => {
@@ -345,6 +358,7 @@ pub(super) fn render_files(frame: &mut Frame, area: Rect, pane: FilesPane, view:
 fn diff_with_threads(
     file: &FileDiff,
     discussions: &[Discussion],
+    drafts: &[DraftComment],
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let base = diff_lines(file);
     if file.too_large || file.lines.is_empty() {
@@ -362,9 +376,29 @@ fn diff_with_threads(
         {
             lines.extend(thread_lines(thread, now));
         }
+        for draft in drafts.iter().filter(|d| d.is_on(file, diff_line)) {
+            lines.extend(draft_lines(draft));
+        }
         starts.push((start, lines.len() - start));
     }
     (lines, starts)
+}
+
+/// A review draft under its line: magenta, so it is not mistaken for a sent comment.
+fn draft_lines(draft: &DraftComment) -> Vec<Line<'static>> {
+    let bar = || Span::raw("          ┃ ").fg(Color::Magenta);
+    let mut lines = vec![Line::from(vec![
+        bar(),
+        Span::raw("✎ draft").fg(Color::Magenta).bold(),
+        Span::raw("  (c edit · d delete · R send the review)").dark_gray(),
+    ])];
+    lines.extend(draft.body.lines().map(|text| {
+        Line::from(vec![
+            bar(),
+            Span::raw(format!("  {}", format::expand_tabs(text))),
+        ])
+    }));
+    lines
 }
 
 /// A thread under its diff line: a yellow bar, who wrote what and when.
@@ -615,9 +649,10 @@ fn discussion_lines(detail: &MrDetail) -> Vec<Line<'static>> {
     lines
 }
 
-pub(super) fn render_popup(frame: &mut Frame, state: &DetailState) {
+pub(super) fn render_popup(frame: &mut Frame, state: &DetailState, drafts: &[DraftComment]) {
     match state.popup {
         Some(Popup::Comment) => render_comment_popup(frame, state),
+        Some(Popup::FinishReview) => render_review_popup(frame, state, drafts.len()),
         Some(Popup::ConfirmMerge) => render_merge_popup(frame, state),
         Some(Popup::ConfirmCi(action)) => render_ci_popup(frame, &state.ci, action),
         None => {}
@@ -649,10 +684,14 @@ fn render_comment_popup(frame: &mut Frame, state: &DetailState) {
         Some(target) => target.title(),
         None => format!("Comment on {}", state.reference),
     };
-    let block = popup_block(
-        format!(" {title} "),
-        " Ctrl+S send · Enter new line · Esc close (draft is kept) ",
-    );
+    // A new comment on a line can also wait for the review.
+    let hint = match state.comment_target {
+        Some(CommentTarget::Line(_)) => {
+            " Ctrl+S send now · Ctrl+D add to review · Enter new line · Esc close "
+        }
+        _ => " Ctrl+S send · Enter new line · Esc close (draft is kept) ",
+    };
+    let block = popup_block(format!(" {title} "), hint);
     let inner = block.inner(popup);
     // `Clear` erases what is underneath, otherwise the list would show through.
     frame.render_widget(Clear, popup);
@@ -664,6 +703,55 @@ fn render_comment_popup(frame: &mut Frame, state: &DetailState) {
     let total = u16::try_from(paragraph.line_count(inner.width)).unwrap_or(u16::MAX);
     let scroll = total.saturating_sub(inner.height);
     frame.render_widget(paragraph.scroll((scroll, 0)), inner);
+}
+
+/// The end of a review: how many line comments, the verdict (`Tab`), and the summary.
+fn render_review_popup(frame: &mut Frame, state: &DetailState, drafts: usize) {
+    let area = frame.area();
+    let popup = centered(area, area.width.saturating_sub(8).min(90), 14);
+    let block = popup_block(
+        format!(" Finish review of {} ", state.reference),
+        " type a summary · Tab verdict · Ctrl+S send · Esc close (kept) ",
+    );
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let [count, verdicts, gap, summary] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+
+    let count_line = match drafts {
+        0 => Line::from("No line comments: the review is the summary and the verdict.").dark_gray(),
+        n => Line::from(format!("{n} line comment(s) will be sent with it.")),
+    };
+    frame.render_widget(Paragraph::new(count_line), count);
+
+    let mut choices = vec![Verdict::Comment, Verdict::Approve];
+    if state.forge.can_request_changes() {
+        choices.push(Verdict::RequestChanges);
+    }
+    let mut spans = vec![Span::raw("Verdict: ").dark_gray()];
+    for choice in choices {
+        let label = format!(" {} ", choice.label());
+        spans.push(if choice == state.verdict {
+            Span::raw(label).bold().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Span::raw(label).dark_gray()
+        });
+        spans.push(Span::raw(" "));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), verdicts);
+    let _ = gap;
+
+    let text = format!("{}█", state.review_body);
+    let paragraph = Paragraph::new(text).wrap(Wrap { trim: false });
+    let total = u16::try_from(paragraph.line_count(summary.width)).unwrap_or(u16::MAX);
+    let scroll = total.saturating_sub(summary.height);
+    frame.render_widget(paragraph.scroll((scroll, 0)), summary);
 }
 
 fn render_merge_popup(frame: &mut Frame, state: &DetailState) {
@@ -786,7 +874,7 @@ mod tests {
             id: "d1".into(),
             notes: vec![note],
         };
-        let (lines, starts) = diff_with_threads(&file, &[thread]);
+        let (lines, starts) = diff_with_threads(&file, &[thread], &[]);
         let text =
             |i: usize| -> String { lines[i].spans.iter().map(|s| s.content.as_ref()).collect() };
         // Header, `keep` and its thread (author + 2 lines), then `new`.

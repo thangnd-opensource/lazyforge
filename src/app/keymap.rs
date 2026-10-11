@@ -20,6 +20,10 @@ pub fn action_for_key(key: KeyEvent, context: KeyContext) -> Option<Action> {
         KeyContext::Detail => detail_key(key, ctrl),
         KeyContext::DetailPipelines => pipelines_key(key, ctrl).or_else(|| detail_key(key, ctrl)),
         KeyContext::CommentEditor => comment_key(key, ctrl),
+        KeyContext::ReviewEditor => match key.code {
+            KeyCode::Tab => Some(Action::CycleVerdict),
+            _ => comment_key(key, ctrl).filter(|a| !matches!(a, Action::SaveDraft)),
+        },
         KeyContext::Picker => match key.code {
             KeyCode::Char('j') | KeyCode::Down => Some(Action::SelectNext),
             KeyCode::Char('k') | KeyCode::Up => Some(Action::SelectPrevious),
@@ -127,6 +131,8 @@ fn detail_key(key: KeyEvent, ctrl: bool) -> Option<Action> {
         KeyCode::PageDown | KeyCode::Char(' ') => Some(Action::ScrollDown(PAGE)),
         KeyCode::PageUp => Some(Action::ScrollUp(PAGE)),
         KeyCode::Char('a') => Some(Action::ToggleApprove),
+        KeyCode::Char('R') => Some(Action::StartReview),
+        KeyCode::Char('d') => Some(Action::DeleteDraft),
         KeyCode::Char('C') => Some(Action::Checkout),
         KeyCode::Char('e') => Some(Action::OpenEditor),
         KeyCode::Char('c') => Some(Action::StartComment),
@@ -194,6 +200,7 @@ fn comment_key(key: KeyEvent, ctrl: bool) -> Option<Action> {
         // freezing the terminal.
         return match key.code {
             KeyCode::Char('s') => Some(Action::SubmitComment),
+            KeyCode::Char('d') => Some(Action::SaveDraft),
             _ => None,
         };
     }
@@ -319,8 +326,17 @@ mod tests {
             action_for_key(key(KeyCode::Esc), ctx),
             Some(Action::CloseDetail)
         ));
-        // ...and pipeline keys do nothing elsewhere.
-        assert!(action_for_key(key(KeyCode::Char('R')), KeyContext::Detail).is_none());
+        // `R` retries a job here, and finishes the review elsewhere.
+        assert!(matches!(
+            action_for_key(key(KeyCode::Char('R')), ctx),
+            Some(Action::Ci(CiActionKind::RetryJob))
+        ));
+        assert!(matches!(
+            action_for_key(key(KeyCode::Char('R')), KeyContext::Detail),
+            Some(Action::StartReview)
+        ));
+        // Other pipeline keys do nothing elsewhere.
+        assert!(action_for_key(key(KeyCode::Char('X')), KeyContext::Detail).is_none());
     }
 
     #[test]

@@ -203,6 +203,7 @@ pub(super) fn render_screen(
         detail::FilesPane {
             files: &comparison.files,
             discussions: &[],
+            drafts: &[],
             selected: screen.selected_file,
             scroll: screen.scroll,
             cursor: screen.diff_focused.then_some(screen.diff_cursor),

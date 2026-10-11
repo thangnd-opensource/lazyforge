@@ -1,8 +1,11 @@
 //! State and key handling for the merge request detail screen.
 
 use super::ci::{self, CiSource, CiState};
+use super::review;
 use super::{Action, AppState, Command, Notice};
-use crate::forge::{CiAction, FileDiff, ForgeKind, LinePosition, MergeRequest, MrAction, MrDetail};
+use crate::forge::{
+    CiAction, FileDiff, ForgeKind, LinePosition, MergeRequest, MrAction, MrDetail, Verdict,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -42,6 +45,8 @@ impl Section {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Popup {
     Comment,
+    /// Ends the review: summary, verdict, send.
+    FinishReview,
     ConfirmMerge,
     /// Asks before canceling a job or pipeline.
     ConfirmCi(CiAction),
@@ -77,6 +82,11 @@ pub struct DetailState {
     pub draft: String,
     /// What the comment being written answers; `None` for a general comment.
     pub comment_target: Option<CommentTarget>,
+    /// The comment editor holds an existing review draft (closing it drops the text).
+    pub editing_draft: bool,
+    /// The review's summary, kept while the "finish review" popup is closed.
+    pub review_body: String,
+    pub verdict: Verdict,
     /// Set while an action runs ("approving…"); other actions wait for it.
     pub busy: Option<&'static str>,
     /// The Pipelines section. Loaded the first time the section is opened.
@@ -105,6 +115,9 @@ impl DetailState {
             popup: None,
             draft: String::new(),
             comment_target: None,
+            editing_draft: false,
+            review_body: String::new(),
+            verdict: Verdict::Comment,
             busy: None,
             ci: CiState::new(
                 CiSource::MergeRequest {
@@ -137,7 +150,7 @@ impl DetailState {
         }
     }
 
-    fn start_action(&mut self, action: MrAction) -> Command {
+    pub(super) fn start_action(&mut self, action: MrAction) -> Command {
         self.busy = Some(busy_label(&action));
         Command::RunMrAction {
             project_path: self.project_path.clone(),
@@ -154,6 +167,7 @@ fn busy_label(action: &MrAction) -> &'static str {
         MrAction::Comment(_) | MrAction::LineComment { .. } | MrAction::Reply { .. } => {
             "posting comment…"
         }
+        MrAction::SubmitReview { .. } => "sending review…",
         MrAction::Merge { .. } => "merging…",
     }
 }
@@ -168,6 +182,19 @@ pub(super) fn success_message(action: &MrAction, reference: &str) -> String {
             format!("Comment posted on {}", position.label())
         }
         MrAction::Reply { label, .. } => format!("Reply posted on {label}"),
+        MrAction::SubmitReview {
+            verdict, comments, ..
+        } => {
+            let outcome = match verdict {
+                Verdict::Comment => "",
+                Verdict::Approve => ", approved",
+                Verdict::RequestChanges => ", changes requested",
+            };
+            format!(
+                "Review sent on {reference}: {} comment(s){outcome}",
+                comments.len()
+            )
+        }
         MrAction::Merge { .. } => format!("Merged {reference}"),
     }
 }
@@ -315,6 +342,9 @@ fn comment_target(detail: &DetailState) -> Result<CommentTarget, String> {
 
 /// Handles user actions while the detail screen is open.
 pub(super) fn update(state: &mut AppState, action: Action) -> Option<Command> {
+    if matches!(state.detail.as_ref()?.popup, Some(Popup::FinishReview)) {
+        return review::update_finish(state, action);
+    }
     // `detail` mutably borrows `state.detail`. While it is alive we can still use other
     // *fields* of `state` (`state.notice`, `state.next_request_id`), because the borrow
     // checker tracks fields separately, but not methods that take `&mut self` on all of
@@ -412,8 +442,17 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Option<Command> {
             return Some(detail.start_action(action));
         }
         Action::StartComment => {
-            // In the diff, the comment is about the line under the cursor.
+            // In the diff, the comment is about the line under the cursor; a draft already
+            // there opens for editing.
             detail.comment_target = None;
+            if let Some(index) = review::on_cursor(detail, &state.review_drafts) {
+                let draft = review::of(&state.review_drafts, detail)[index].clone();
+                detail.comment_target = Some(CommentTarget::Line(draft.position));
+                detail.draft = draft.body;
+                detail.editing_draft = true;
+                detail.popup = Some(Popup::Comment);
+                return None;
+            }
             if detail.section == Section::Files && detail.diff_focused {
                 match comment_target(detail) {
                     Ok(target) => detail.comment_target = Some(target),
@@ -474,7 +513,20 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Option<Command> {
             }
             other => detail.popup = other,
         },
-        Action::ClosePopup => detail.popup = None,
+        Action::ClosePopup => {
+            detail.popup = None;
+            // An edited draft is kept as it was; the editor's copy goes.
+            if std::mem::take(&mut detail.editing_draft) {
+                detail.draft.clear();
+            }
+        }
+        Action::SaveDraft => {
+            review::save_draft(detail, &mut state.review_drafts, &mut state.notice)
+        }
+        Action::DeleteDraft => {
+            review::delete_draft(detail, &mut state.review_drafts, &mut state.notice)
+        }
+        Action::StartReview => review::start(detail),
         _ => {}
     }
     None
@@ -790,6 +842,201 @@ mod tests {
             ),
             "{command:?}"
         );
+    }
+
+    /// The Files section with the diff focused and the cursor on the added line 2.
+    fn on_added_line(state: &mut AppState) {
+        update(state, Action::NextSection);
+        update(state, Action::FocusContent);
+        update(state, Action::ScrollDown(3));
+    }
+
+    fn type_text(state: &mut AppState, text: &str) {
+        for c in text.chars() {
+            update(state, Action::CommentInput(c));
+        }
+    }
+
+    #[test]
+    fn line_comments_can_wait_for_the_review() {
+        let mut state = open(loaded_detail(can_approve(), true));
+        on_added_line(&mut state);
+        update(&mut state, Action::StartComment);
+        type_text(&mut state, "Typo");
+        assert!(
+            update(&mut state, Action::SaveDraft).is_none(),
+            "nothing sent"
+        );
+        assert!(detail(&state).popup.is_none());
+        let drafts = &state.review_drafts[&("group/api".to_string(), 42)];
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].body, "Typo");
+        assert_eq!(drafts[0].position.new_line, Some(2));
+
+        // `c` on the same line edits the draft; emptying it removes it.
+        update(&mut state, Action::StartComment);
+        assert_eq!(detail(&state).draft, "Typo");
+        type_text(&mut state, "!");
+        update(&mut state, Action::SaveDraft);
+        assert_eq!(
+            state.review_drafts[&("group/api".to_string(), 42)][0].body,
+            "Typo!"
+        );
+        // Closing the editor of a draft keeps the draft as it was.
+        update(&mut state, Action::StartComment);
+        update(&mut state, Action::CommentBackspace);
+        update(&mut state, Action::ClosePopup);
+        assert!(detail(&state).draft.is_empty());
+        assert_eq!(
+            state.review_drafts[&("group/api".to_string(), 42)][0].body,
+            "Typo!"
+        );
+
+        // `d` drops it.
+        update(&mut state, Action::DeleteDraft);
+        assert!(state.review_drafts[&("group/api".to_string(), 42)].is_empty());
+    }
+
+    #[test]
+    fn a_review_is_sent_once_with_its_drafts() {
+        let mut state = open(loaded_detail(can_approve(), true));
+        on_added_line(&mut state);
+        update(&mut state, Action::StartComment);
+        type_text(&mut state, "Typo");
+        update(&mut state, Action::SaveDraft);
+
+        update(&mut state, Action::StartReview);
+        assert_eq!(state.key_context(), crate::app::KeyContext::ReviewEditor);
+        // GitLab: Comment → Approve → Comment (no "request changes").
+        update(&mut state, Action::CycleVerdict);
+        assert_eq!(detail(&state).verdict, Verdict::Approve);
+        update(&mut state, Action::CycleVerdict);
+        assert_eq!(detail(&state).verdict, Verdict::Comment);
+        update(&mut state, Action::CycleVerdict);
+        type_text(&mut state, "LGTM");
+        let command = update(&mut state, Action::SubmitComment);
+        let Some(Command::RunMrAction {
+            action:
+                MrAction::SubmitReview {
+                    body,
+                    verdict,
+                    comments,
+                },
+            ..
+        }) = command
+        else {
+            panic!("expected a review, got {command:?}");
+        };
+        assert_eq!(
+            (body.as_str(), verdict, comments.len()),
+            ("LGTM", Verdict::Approve, 1)
+        );
+        // Drafts stay until the server says yes...
+        assert_eq!(state.review_drafts[&("group/api".to_string(), 42)].len(), 1);
+        let action = MrAction::SubmitReview {
+            body,
+            verdict,
+            comments,
+        };
+        finish(&mut state, action, Ok(()));
+        // ...then they are gone.
+        assert!(
+            !state
+                .review_drafts
+                .contains_key(&("group/api".to_string(), 42))
+        );
+        assert!(detail(&state).review_body.is_empty());
+        assert!(
+            state
+                .notice
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("1 comment(s), approved")
+        );
+    }
+
+    #[test]
+    fn a_half_sent_review_drops_its_drafts() {
+        let mut state = open(loaded_detail(can_approve(), true));
+        on_added_line(&mut state);
+        update(&mut state, Action::StartComment);
+        type_text(&mut state, "Typo");
+        update(&mut state, Action::SaveDraft);
+        let comments = state.review_drafts[&("group/api".to_string(), 42)].clone();
+        let action = MrAction::SubmitReview {
+            body: String::new(),
+            verdict: Verdict::Approve,
+            comments,
+        };
+        // Published, then the approval was refused: the drafts are gone, the error shown.
+        finish(
+            &mut state,
+            action,
+            Err(ApiError::PartlyDone(
+                "comments sent, but no approval".into(),
+            )),
+        );
+        assert!(
+            !state
+                .review_drafts
+                .contains_key(&("group/api".to_string(), 42))
+        );
+        assert!(state.notice.as_ref().unwrap().is_error);
+
+        // Any other failure keeps them for another try.
+        update(&mut state, Action::StartComment);
+        type_text(&mut state, "Again");
+        update(&mut state, Action::SaveDraft);
+        let comments = state.review_drafts[&("group/api".to_string(), 42)].clone();
+        let action = MrAction::SubmitReview {
+            body: String::new(),
+            verdict: Verdict::Comment,
+            comments,
+        };
+        finish(&mut state, action, Err(ApiError::Forbidden("nope".into())));
+        assert_eq!(state.review_drafts[&("group/api".to_string(), 42)].len(), 1);
+    }
+
+    #[test]
+    fn an_empty_review_is_not_sent() {
+        let mut state = open(loaded_detail(can_approve(), true));
+        update(&mut state, Action::StartReview);
+        assert!(update(&mut state, Action::SubmitComment).is_none());
+        assert!(
+            state
+                .notice
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("Nothing to send")
+        );
+    }
+
+    #[test]
+    fn drafts_survive_leaving_the_merge_request_and_quitting_asks_first() {
+        let mut state = open(loaded_detail(can_approve(), true));
+        on_added_line(&mut state);
+        update(&mut state, Action::StartComment);
+        type_text(&mut state, "Typo");
+        update(&mut state, Action::SaveDraft);
+        update(&mut state, Action::FocusList);
+        update(&mut state, Action::CloseDetail);
+        assert!(state.detail.is_none());
+        assert_eq!(state.review_drafts[&("group/api".to_string(), 42)].len(), 1);
+
+        update(&mut state, Action::Quit);
+        assert!(!state.should_quit);
+        assert!(
+            state
+                .notice
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("1 review comment(s) not sent")
+        );
+        update(&mut state, Action::Quit);
+        assert!(state.should_quit, "the second q quits");
     }
 
     #[test]

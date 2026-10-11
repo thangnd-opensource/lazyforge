@@ -12,8 +12,9 @@ use super::rest::{
     RawOpenMergeRequest, RawRefPipeline,
 };
 use crate::forge::{
-    ApiError, BranchPage, CiAction, CiSnapshot, Comparison, Discussion, Job, MrAction, MrDetail,
-    MrList, MrPage, Pipeline, PipelineList, PipelinePage, Repository, User, sort_jobs,
+    ApiError, BranchPage, CiAction, CiSnapshot, Comparison, Discussion, DraftComment, Job,
+    LinePosition, MrAction, MrDetail, MrList, MrPage, Pipeline, PipelineList, PipelinePage,
+    Repository, User, Verdict, sort_jobs,
 };
 
 const PAGE_SIZE: u32 = 50;
@@ -268,6 +269,59 @@ impl GitLabClient {
         }
     }
 
+    /// A review: each line comment becomes a draft note, the summary a general one, and
+    /// `bulk_publish` makes them all public at once (one notification); then the approval.
+    async fn submit_review(
+        &self,
+        project: &str,
+        iid: u64,
+        body: &str,
+        verdict: Verdict,
+        comments: &[DraftComment],
+    ) -> Result<(), ApiError> {
+        // Checked before anything is created on the server.
+        if verdict == Verdict::RequestChanges {
+            return Err(ApiError::Unsupported(
+                "GitLab has no \"request changes\" here: send the review as Comment".into(),
+            ));
+        }
+        let drafts = self.mr_url(project, iid, &["draft_notes"]);
+        for comment in comments {
+            let note =
+                json!({ "note": comment.body, "position": gitlab_position(&comment.position) });
+            self.send(self.http.post(drafts.clone()).json(&note))
+                .await?;
+        }
+        if !body.trim().is_empty() {
+            self.send(
+                self.http
+                    .post(drafts.clone())
+                    .json(&json!({ "note": body })),
+            )
+            .await?;
+        }
+        if !comments.is_empty() || !body.trim().is_empty() {
+            let publish = self.mr_url(project, iid, &["draft_notes", "bulk_publish"]);
+            self.send(self.http.post(publish)).await?;
+        }
+        if verdict == Verdict::Approve {
+            match self
+                .send(self.http.post(self.mr_url(project, iid, &["approve"])))
+                .await
+            {
+                Ok(_) => {}
+                // See `run_action`: 401 here means "cannot approve", not a bad token.
+                Err(ApiError::Unauthorized) => {
+                    return Err(ApiError::PartlyDone(
+                        "comments sent, but GitLab refused the approval (already approved, or not allowed)".into(),
+                    ));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(())
+    }
+
     /// Approve, unapprove, comment or merge. Needs a token with the `api` scope.
     pub async fn run_action(
         &self,
@@ -282,30 +336,19 @@ impl GitLabClient {
                 .http
                 .post(self.mr_url(project, iid, &["notes"]))
                 .json(&json!({ "body": body })),
-            MrAction::LineComment { body, position } => {
+            MrAction::LineComment { body, position } => self
+                .http
+                .post(self.mr_url(project, iid, &["discussions"]))
                 // A discussion with a position: GitLab's way of commenting on a diff line.
-                let refs = &position.refs;
-                let mut place = json!({
-                    "position_type": "text",
-                    "head_sha": refs.head_sha,
-                    "old_path": position.old_path,
-                    "new_path": position.new_path,
-                });
-                for (key, value) in [("base_sha", &refs.base_sha), ("start_sha", &refs.start_sha)] {
-                    if let Some(sha) = value {
-                        place[key] = json!(sha);
-                    }
-                }
-                // Unchanged lines need both numbers; added only new, removed only old.
-                if let Some(line) = position.old_line {
-                    place["old_line"] = json!(line);
-                }
-                if let Some(line) = position.new_line {
-                    place["new_line"] = json!(line);
-                }
-                self.http
-                    .post(self.mr_url(project, iid, &["discussions"]))
-                    .json(&json!({ "body": body, "position": place }))
+                .json(&json!({ "body": body, "position": gitlab_position(position) })),
+            MrAction::SubmitReview {
+                body,
+                verdict,
+                comments,
+            } => {
+                return self
+                    .submit_review(project, iid, body, *verdict, comments)
+                    .await;
             }
             MrAction::Reply {
                 body, discussion, ..
@@ -523,6 +566,30 @@ fn optional<T>(result: Result<Vec<T>, ApiError>, what: &str) -> Vec<T> {
         tracing::warn!(error = %err, "branches: could not load {what}");
         Vec::new()
     })
+}
+
+/// A diff line as GitLab places notes on it.
+fn gitlab_position(position: &LinePosition) -> Value {
+    let refs = &position.refs;
+    let mut place = json!({
+        "position_type": "text",
+        "head_sha": refs.head_sha,
+        "old_path": position.old_path,
+        "new_path": position.new_path,
+    });
+    for (key, value) in [("base_sha", &refs.base_sha), ("start_sha", &refs.start_sha)] {
+        if let Some(sha) = value {
+            place[key] = json!(sha);
+        }
+    }
+    // Unchanged lines need both numbers; added only new, removed only old.
+    if let Some(line) = position.old_line {
+        place["old_line"] = json!(line);
+    }
+    if let Some(line) = position.new_line {
+        place["new_line"] = json!(line);
+    }
+    place
 }
 
 #[cfg(test)]
@@ -1167,5 +1234,110 @@ mod tests {
             .run_action("group/api", 42, &action)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_review_publishes_draft_notes_then_approves() {
+        let server = MockServer::start().await;
+        let mr = "/api/v4/projects/group%2Fapi/merge_requests/42";
+        for route in ["/draft_notes", "/draft_notes/bulk_publish", "/approve"] {
+            Mock::given(method("POST"))
+                .and(path(format!("{mr}{route}")))
+                .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+                .mount(&server)
+                .await;
+        }
+        let action = MrAction::SubmitReview {
+            body: "LGTM".into(),
+            verdict: crate::forge::Verdict::Approve,
+            comments: vec![crate::forge::DraftComment {
+                position: position(None, Some(9)),
+                body: "Nit".into(),
+            }],
+        };
+        client_for(&server, "t")
+            .run_action("group/api", 42, &action)
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let paths: Vec<String> = requests
+            .iter()
+            .map(|r| r.url.path().replace(mr, ""))
+            .collect();
+        // The line comment, the summary, one publish (one notification), then the approval.
+        assert_eq!(
+            paths,
+            [
+                "/draft_notes",
+                "/draft_notes",
+                "/draft_notes/bulk_publish",
+                "/approve"
+            ]
+        );
+        let first: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(first["note"], "Nit");
+        assert_eq!(first["position"]["new_line"], 9);
+        let second: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(second, json!({"note": "LGTM"}));
+    }
+
+    #[tokio::test]
+    async fn request_changes_is_refused_before_anything_is_created() {
+        let server = MockServer::start().await;
+        let action = MrAction::SubmitReview {
+            body: "No".into(),
+            verdict: crate::forge::Verdict::RequestChanges,
+            comments: vec![],
+        };
+        let err = client_for(&server, "t")
+            .run_action("group/api", 42, &action)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Unsupported(_)), "{err:?}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refused_approval_says_the_comments_were_sent() {
+        let server = MockServer::start().await;
+        let mr = "/api/v4/projects/group%2Fapi/merge_requests/42";
+        for route in ["/draft_notes", "/draft_notes/bulk_publish"] {
+            Mock::given(method("POST"))
+                .and(path(format!("{mr}{route}")))
+                .respond_with(ResponseTemplate::new(201).set_body_json(json!({})))
+                .mount(&server)
+                .await;
+        }
+        // GitLab answers 401 to an approval it refuses (author, or already approved).
+        Mock::given(method("POST"))
+            .and(path(format!("{mr}/approve")))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(json!({"message": "401 Unauthorized"})),
+            )
+            .mount(&server)
+            .await;
+        let action = MrAction::SubmitReview {
+            body: "LGTM".into(),
+            verdict: crate::forge::Verdict::Approve,
+            comments: vec![],
+        };
+        let err = client_for(&server, "t")
+            .run_action("group/api", 42, &action)
+            .await
+            .unwrap_err();
+        // Not "bad token", and marked as half done: the review itself went out.
+        assert!(matches!(err, ApiError::PartlyDone(_)), "{err:?}");
+        assert!(err.to_string().contains("comments sent"), "{err}");
+        let paths: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.url.path().replace(mr, ""))
+            .collect();
+        assert_eq!(
+            paths,
+            ["/draft_notes", "/draft_notes/bulk_publish", "/approve"]
+        );
     }
 }
