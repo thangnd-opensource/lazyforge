@@ -498,6 +498,30 @@ fn diff_lines(file: &FileDiff) -> Vec<Line<'static>> {
             match line.kind {
                 DiffLineKind::HunkHeader => Line::from(line.text.clone()).fg(Color::Cyan),
                 DiffLineKind::Meta => Line::from(line.text.clone()).dark_gray(),
+                // With syntax colors: the sign says added or removed, the code keeps its colors.
+                _ if !line.tokens.is_empty() => {
+                    let (sign, sign_color, dim) = match line.kind {
+                        DiffLineKind::Added => ("+", Color::Green, false),
+                        // Removed code is dimmed, so the old and new versions stand apart.
+                        DiffLineKind::Removed => ("-", Color::Red, true),
+                        _ => (" ", Color::Reset, false),
+                    };
+                    let mut spans = vec![
+                        Span::raw(gutter).dark_gray(),
+                        Span::raw(sign).fg(sign_color).bold(),
+                    ];
+                    spans.extend(line.tokens.iter().map(|token| {
+                        let mut style = Style::new();
+                        if let Some(color) = token.color {
+                            style = style.fg(Color::Indexed(color));
+                        }
+                        if dim {
+                            style = style.add_modifier(Modifier::DIM);
+                        }
+                        Span::styled(format::expand_tabs(&token.text), style)
+                    }));
+                    Line::from(spans)
+                }
                 DiffLineKind::Context => Line::from(vec![
                     Span::raw(gutter).dark_gray(),
                     Span::raw(format!(" {}", format::expand_tabs(&line.text))),

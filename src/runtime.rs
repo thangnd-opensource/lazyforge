@@ -167,10 +167,10 @@ fn spawn(command: Command, client: &Forge, tx: &mpsc::UnboundedSender<Action>) {
         } => {
             let client = client.clone();
             tokio::spawn(async move {
-                let result = client
-                    .merge_request_detail(&project_path, iid)
-                    .await
-                    .map(Box::new);
+                let result = match client.merge_request_detail(&project_path, iid).await {
+                    Ok(detail) => Ok(Box::new(highlighted(detail, |d| &mut d.files).await)),
+                    Err(err) => Err(err),
+                };
                 let _ = tx.send(Action::DetailLoaded { request_id, result });
             });
         }
@@ -262,7 +262,10 @@ fn spawn(command: Command, client: &Forge, tx: &mpsc::UnboundedSender<Action>) {
         } => {
             let client = client.clone();
             tokio::spawn(async move {
-                let result = client.compare(&project, &base, &head).await.map(Box::new);
+                let result = match client.compare(&project, &base, &head).await {
+                    Ok(comparison) => Ok(Box::new(highlighted(comparison, |c| &mut c.files).await)),
+                    Err(err) => Err(err),
+                };
                 let _ = tx.send(Action::ComparisonLoaded { request_id, result });
             });
         }
@@ -351,4 +354,28 @@ fn editor_command(editor: &str, dir: &Path) -> std::process::Command {
     let mut command = std::process::Command::new("cmd");
     command.arg("/C").arg(editor).arg(dir);
     command
+}
+
+/// Adds syntax colors to the files of a loaded diff, on a blocking thread: a large diff takes
+/// a moment, and drawing should only read the result.
+async fn highlighted<T: Send + 'static>(
+    mut loaded: T,
+    files: fn(&mut T) -> &mut Vec<crate::forge::FileDiff>,
+) -> T {
+    tokio::task::spawn_blocking(move || {
+        let files = files(&mut loaded);
+        // Colors are a nicety: if a grammar ever panics, show the diff without them.
+        let colored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::forge::highlight::highlight_files(files);
+        }));
+        if colored.is_err() {
+            tracing::warn!("syntax highlighting failed; showing the diff without colors");
+            for line in files.iter_mut().flat_map(|f| f.lines.iter_mut()) {
+                line.tokens.clear();
+            }
+        }
+        loaded
+    })
+    .await
+    .expect("the closure catches panics")
 }

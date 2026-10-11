@@ -31,6 +31,8 @@ Or build it with Rust 1.89 or newer:
 cargo install --git https://github.com/thangnd-opensource/lazyforge
 ```
 
+Diffs are syntax highlighted (with your terminal's colors). For a smaller binary without it, add `--no-default-features`.
+
 Or from a local checkout: `cargo install --path .`
 
 ## Quick start

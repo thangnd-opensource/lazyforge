@@ -22,6 +22,8 @@
 - [x] Store tokens in the OS keyring (`lazyforge auth login | status | logout`)
 - [ ] OAuth device flow login (needs an OAuth application registered on each GitLab server)
 - [ ] Pagination of merge request lists (detail endpoints are already paginated)
+- [x] Syntax highlighting in diffs (`syntect`, terminal palette colors; `--no-default-features` to leave it out)
+- [ ] Indent wrapped diff lines under the code instead of the line numbers
 - [x] Comment on a line of the diff (`c` with the line cursor), on GitLab and GitHub
 - [x] Show threads under their diff lines, and reply to a thread from the diff
 - [x] Check out a merge request, pull request or branch into the local clone (`C`), and open it in `$EDITOR` (`e`)
@@ -35,7 +37,7 @@
 - Issues
 - Creating and editing merge requests
 - Notifications
-- Side-by-side diff, syntax highlighting (`syntect` behind a feature flag)
+- Side-by-side diff
 - GitHub support. Done: shared `forge/` models, `enum Forge`, GitHub login, pull request lists, platform/account/repository picker, pull request details (diff, comments, review threads) and actions (approve, comment, merge), GitHub Actions (workflow runs, jobs, logs of finished jobs, re-run, cancel run, dashboard). Next: required reviewers from branch protection; live logs if GitHub ever exposes them. Original plan:
   - Add a `forge/` module with shared models (`ChangeRequest`, `CiRun`, `CiJob`, `ReviewState`) that each backend converts into.
   - Pick the backend with an enum (`enum Forge { GitLab(..), GitHub(..) }`) rather than `dyn Trait`: there are only two backends, and async methods on trait objects need extra machinery.

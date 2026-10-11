@@ -5,6 +5,7 @@
 mod client;
 pub mod diff;
 mod error;
+pub mod highlight;
 mod models;
 pub mod trace;
 
