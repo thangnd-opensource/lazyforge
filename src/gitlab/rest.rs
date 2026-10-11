@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 
 use crate::forge::{
-    Approvals, Branch, BranchPage, Comparison, Discussion, FileDiff, MrDetail, PipelineStatus, User,
+    Approvals, Branch, BranchPage, Comparison, DiffRefs, Discussion, FileDiff, MrDetail,
+    PipelineStatus, User,
 };
 
 /// `GET /projects/:id/merge_requests/:iid`
@@ -33,8 +34,17 @@ pub(crate) struct RawMergeRequest {
     #[serde(default)]
     pub has_conflicts: bool,
     pub head_pipeline: Option<RawPipeline>,
+    /// The commits the diff is between; `null` while GitLab prepares the diff.
+    pub diff_refs: Option<RawDiffRefs>,
     /// Permissions of the current user on this merge request.
     pub user: Option<RawUserPermissions>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawDiffRefs {
+    pub base_sha: Option<String>,
+    pub start_sha: Option<String>,
+    pub head_sha: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -251,6 +261,13 @@ pub(crate) fn into_detail(
         source_branch: mr.source_branch,
         target_branch: mr.target_branch,
         web_url: mr.web_url,
+        diff_refs: mr.diff_refs.and_then(|refs| {
+            Some(DiffRefs {
+                head_sha: refs.head_sha?,
+                base_sha: refs.base_sha,
+                start_sha: refs.start_sha,
+            })
+        }),
         sha: mr.sha,
         merge_status: mr.detailed_merge_status.or(mr.merge_status),
         has_conflicts: mr.has_conflicts,

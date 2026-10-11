@@ -211,6 +211,40 @@ impl GitHubClient {
                 .http
                 .post(self.repo_url(repo, &["issues", &n, "comments"])?)
                 .json(&json!({ "body": body })),
+            MrAction::LineComment { body, position } => {
+                // Added and unchanged lines are on the new side, removed lines on the old.
+                let (path, line, side) = match (position.new_line, position.old_line) {
+                    (Some(line), _) => (&position.new_path, line, "RIGHT"),
+                    (None, Some(line)) => (&position.old_path, line, "LEFT"),
+                    (None, None) => {
+                        return Err(ApiError::Unsupported(
+                            "this line cannot take a comment".into(),
+                        ));
+                    }
+                };
+                self.http
+                    .post(self.repo_url(repo, &["pulls", &n, "comments"])?)
+                    .json(&json!({
+                        "body": body,
+                        "commit_id": position.refs.head_sha,
+                        "path": path,
+                        "line": line,
+                        "side": side,
+                    }))
+            }
+            MrAction::Reply {
+                body, discussion, ..
+            } => {
+                // Line comment threads are `thread-<id of their first comment>` (see rest.rs).
+                let Some(first) = discussion.strip_prefix("thread-") else {
+                    return Err(ApiError::Unsupported(
+                        "only threads on diff lines take replies here".into(),
+                    ));
+                };
+                self.http
+                    .post(self.repo_url(repo, &["pulls", &n, "comments", first, "replies"])?)
+                    .json(&json!({ "body": body }))
+            }
             MrAction::Merge { sha } => {
                 // Use a merge method the repository allows.
                 let repository: rest::RawRepository =
@@ -1253,5 +1287,79 @@ mod tests {
             .unwrap();
         assert_eq!(comparison.commits, 3);
         assert!(comparison.files[0].new_file);
+    }
+
+    #[tokio::test]
+    async fn line_comments_go_on_the_right_side() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/repos/acme/api/pulls/42/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": 1})))
+            .mount(&server)
+            .await;
+        let position = |old_line, new_line| crate::forge::LinePosition {
+            old_path: "src/old.rs".into(),
+            new_path: "src/new.rs".into(),
+            old_line,
+            new_line,
+            refs: crate::forge::DiffRefs {
+                base_sha: None,
+                start_sha: None,
+                head_sha: "head1".into(),
+            },
+        };
+        let client = client_for(&server);
+        for (old, new) in [(Some(3), Some(4)), (Some(5), None)] {
+            let action = MrAction::LineComment {
+                body: "Hmm".into(),
+                position: position(old, new),
+            };
+            client.run_action("acme/api", 42, &action).await.unwrap();
+        }
+        let sent: Vec<Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        // Unchanged and added lines: the new file, RIGHT side.
+        assert_eq!(
+            sent[0],
+            json!({"body": "Hmm", "commit_id": "head1", "path": "src/new.rs", "line": 4, "side": "RIGHT"})
+        );
+        // Removed lines: the old file, LEFT side.
+        assert_eq!(
+            sent[1],
+            json!({"body": "Hmm", "commit_id": "head1", "path": "src/old.rs", "line": 5, "side": "LEFT"})
+        );
+    }
+
+    #[tokio::test]
+    async fn replies_go_to_the_threads_first_comment() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v3/repos/acme/api/pulls/42/comments/200/replies"))
+            .and(wiremock::matchers::body_json(json!({"body": "Fixed"})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": 202})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let reply = |discussion: &str| MrAction::Reply {
+            body: "Fixed".into(),
+            discussion: discussion.into(),
+            label: "src/a.rs:9".into(),
+        };
+        let client = client_for(&server);
+        client
+            .run_action("acme/api", 42, &reply("thread-200"))
+            .await
+            .unwrap();
+        // A pull request comment is not a thread on a line.
+        let err = client
+            .run_action("acme/api", 42, &reply("comment-50"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Unsupported(_)), "{err:?}");
     }
 }

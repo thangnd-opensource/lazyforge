@@ -11,7 +11,7 @@ use super::{Panes, ViewState, ci, format, pipeline_symbol};
 use crate::app::ci::CiState;
 use crate::app::detail::{DetailState, Popup, Section};
 use crate::forge::diff::DiffLineKind;
-use crate::forge::{CiAction, FileDiff, MrDetail};
+use crate::forge::{CiAction, Discussion, FileDiff, MrDetail};
 
 pub(super) fn render(frame: &mut Frame, area: Rect, state: &DetailState, view: &mut ViewState) {
     let [title, sections, body] = Layout::vertical([
@@ -57,10 +57,13 @@ pub(super) fn render(frame: &mut Frame, area: Rect, state: &DetailState, view: &
             render_files(
                 frame,
                 body,
-                &detail.files,
-                state.selected_file,
-                state.scroll,
-                state.diff_focused,
+                FilesPane {
+                    files: &detail.files,
+                    discussions: &detail.discussions,
+                    selected: state.selected_file,
+                    scroll: state.scroll,
+                    cursor: state.diff_focused.then_some(state.diff_cursor),
+                },
                 view,
             );
         }
@@ -264,17 +267,28 @@ fn overview_lines(detail: &MrDetail) -> Vec<Line<'static>> {
     lines
 }
 
+/// What `render_files` draws.
+pub(super) struct FilesPane<'a> {
+    pub files: &'a [FileDiff],
+    /// Threads to show under their diff lines (none for a branch comparison).
+    pub discussions: &'a [Discussion],
+    pub selected: usize,
+    pub scroll: u16,
+    /// The line cursor, when the diff has the focus.
+    pub cursor: Option<usize>,
+}
+
 /// Changed files on the left, the selected file's diff on the right. Shared by merge
 /// requests and branch comparisons.
-pub(super) fn render_files(
-    frame: &mut Frame,
-    area: Rect,
-    files: &[FileDiff],
-    selected: usize,
-    scroll: u16,
-    diff_focused: bool,
-    view: &mut ViewState,
-) {
+pub(super) fn render_files(frame: &mut Frame, area: Rect, pane: FilesPane, view: &mut ViewState) {
+    let FilesPane {
+        files,
+        discussions,
+        selected,
+        scroll,
+        cursor,
+    } = pane;
+    let diff_focused = cursor.is_some();
     let list_width = (area.width / 3).clamp(24, 50);
     let [list_area, diff_area] =
         Layout::horizontal([Constraint::Length(list_width), Constraint::Min(0)]).areas(area);
@@ -314,14 +328,130 @@ pub(super) fn render_files(
     } else {
         format!(" {} ", file.new_path)
     };
-    render_scrollable(
-        frame,
-        diff_area,
-        diff_border.title(title),
-        diff_lines(file),
-        scroll,
-        view,
-    );
+    let block = diff_border.title(title);
+    let (lines, starts) = diff_with_threads(file, discussions);
+    match cursor {
+        // Lines that are only a message ("Diff too large…") have no cursor.
+        Some(cursor) if !starts.is_empty() => {
+            let key = (selected, file.new_path.clone());
+            render_with_cursor(frame, diff_area, block, lines, &starts, cursor, key, view);
+        }
+        _ => render_scrollable(frame, diff_area, block, lines, scroll, view),
+    }
+}
+
+/// The diff's lines with the threads on each line right below it, and for each diff line
+/// where it starts and how many display lines it takes with its threads.
+fn diff_with_threads(
+    file: &FileDiff,
+    discussions: &[Discussion],
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    let base = diff_lines(file);
+    if file.too_large || file.lines.is_empty() {
+        return (base, Vec::new());
+    }
+    let now = Utc::now();
+    let mut lines = Vec::with_capacity(base.len());
+    let mut starts = Vec::with_capacity(base.len());
+    for (line, diff_line) in base.into_iter().zip(&file.lines) {
+        let start = lines.len();
+        lines.push(line);
+        for thread in discussions
+            .iter()
+            .filter(|d| d.position().is_some_and(|p| p.is_on(file, diff_line)))
+        {
+            lines.extend(thread_lines(thread, now));
+        }
+        starts.push((start, lines.len() - start));
+    }
+    (lines, starts)
+}
+
+/// A thread under its diff line: a yellow bar, who wrote what and when.
+fn thread_lines(thread: &Discussion, now: chrono::DateTime<Utc>) -> Vec<Line<'static>> {
+    const INDENT: &str = "          ";
+    let bar = || Span::raw(format!("{INDENT}┃ ")).fg(Color::Yellow);
+    let mut lines = Vec::new();
+    for (i, note) in thread.notes.iter().filter(|n| !n.system).enumerate() {
+        let marker = if i == 0 { "● " } else { "↳ " };
+        lines.push(Line::from(vec![
+            bar(),
+            Span::raw(marker).fg(Color::Yellow),
+            Span::raw(format!("@{}", note.author.username)).bold(),
+            Span::raw(format!(
+                " · {}",
+                format::relative_time(note.created_at, now)
+            ))
+            .dark_gray(),
+        ]));
+        for text in note.body.lines() {
+            lines.push(Line::from(vec![
+                bar(),
+                Span::raw(format!("  {}", format::expand_tabs(text))),
+            ]));
+        }
+    }
+    lines
+}
+
+/// The diff with the line under the cursor highlighted, scrolled so that line is visible.
+/// The scroll offset lives in `ViewState` (like ratatui's `ListState`): only drawing knows
+/// how many rows each line takes once wrapped.
+#[allow(clippy::too_many_arguments)] // Drawing inputs; a struct would only rename them.
+fn render_with_cursor(
+    frame: &mut Frame,
+    area: Rect,
+    block: Block,
+    mut lines: Vec<Line<'static>>,
+    starts: &[(usize, usize)],
+    cursor: usize,
+    key: (usize, String),
+    view: &mut ViewState,
+) {
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let height = usize::from(inner.height);
+    let (first, count) = starts[cursor.min(starts.len() - 1)];
+    let rows: Vec<usize> = lines
+        .iter()
+        .map(|line| {
+            Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width)
+                .max(1)
+        })
+        .collect();
+    let start: usize = rows[..first].iter().sum();
+    // The line and its threads, so a thread is read with its line.
+    let tall: usize = rows[first..first + count].iter().sum();
+    let total: usize = rows.iter().sum();
+
+    // Another file: start from the top.
+    if view.diff_offset_for.as_ref() != Some(&key) {
+        view.diff_offset = 0;
+        view.diff_offset_for = Some(key);
+    }
+    let mut offset = view.diff_offset;
+    if start < offset {
+        offset = start;
+    } else if start + tall > offset + height {
+        // As much of the thread as fits, but never past the line itself.
+        offset = (start + tall).saturating_sub(height).min(start);
+    }
+    offset = offset.min(total.saturating_sub(height));
+    view.diff_offset = offset;
+
+    if let Some(line) = lines.get_mut(first) {
+        *line = std::mem::take(line).patch_style(
+            Style::new()
+                .bg(super::SELECTED_BG)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0));
+    frame.render_widget(paragraph, inner);
 }
 
 fn file_item(file: &FileDiff) -> ListItem<'static> {
@@ -491,8 +621,12 @@ pub(super) fn popup_block(title: String, hint: &'static str) -> Block<'static> {
 fn render_comment_popup(frame: &mut Frame, state: &DetailState) {
     let area = frame.area();
     let popup = centered(area, area.width.saturating_sub(8).min(90), 12);
+    let title = match &state.comment_target {
+        Some(target) => target.title(),
+        None => format!("Comment on {}", state.reference),
+    };
     let block = popup_block(
-        format!(" Comment on {} ", state.reference),
+        format!(" {title} "),
         " Ctrl+S send · Enter new line · Esc close (draft is kept) ",
     );
     let inner = block.inner(popup);
@@ -597,4 +731,44 @@ pub(super) fn render_ci_popup(frame: &mut Frame, ci: &CiState, action: CiAction)
 fn singular(forge: crate::forge::ForgeKind) -> String {
     let plural = forge.change_requests().to_lowercase();
     plural.trim_end_matches('s').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forge::Note;
+
+    #[test]
+    fn threads_appear_below_their_line() {
+        let file = FileDiff {
+            old_path: "a.rs".into(),
+            new_path: "a.rs".into(),
+            new_file: false,
+            deleted_file: false,
+            renamed_file: false,
+            too_large: false,
+            lines: crate::forge::diff::parse_unified_diff("@@ -1 +1,2 @@\n keep\n+new\n"),
+            added: 1,
+            removed: 0,
+        };
+        let note: Note = serde_json::from_value(serde_json::json!({
+            "id": 1, "body": "Rename this?\nIt is unclear.",
+            "author": {"username": "hoang", "name": "Hoang"},
+            "created_at": "2026-10-10T08:00:00Z",
+            "position": {"new_path": "a.rs", "new_line": 1, "old_line": 1}
+        }))
+        .unwrap();
+        let thread = Discussion {
+            id: "d1".into(),
+            notes: vec![note],
+        };
+        let (lines, starts) = diff_with_threads(&file, &[thread]);
+        let text =
+            |i: usize| -> String { lines[i].spans.iter().map(|s| s.content.as_ref()).collect() };
+        // Header, `keep` and its thread (author + 2 lines), then `new`.
+        assert_eq!(starts, vec![(0, 1), (1, 4), (5, 1)]);
+        assert!(text(2).contains("@hoang"), "{}", text(2));
+        assert!(text(3).ends_with("Rename this?"), "{}", text(3));
+        assert!(text(5).contains("new"));
+    }
 }

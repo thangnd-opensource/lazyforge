@@ -2,7 +2,7 @@
 
 use super::ci::{self, CiSource, CiState};
 use super::{Action, AppState, Command, Notice};
-use crate::forge::{CiAction, FileDiff, ForgeKind, MergeRequest, MrAction, MrDetail};
+use crate::forge::{CiAction, FileDiff, ForgeKind, LinePosition, MergeRequest, MrAction, MrDetail};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -70,9 +70,13 @@ pub struct DetailState {
     pub scroll: u16,
     /// Files section: `j`/`k` scroll the diff instead of picking a file.
     pub diff_focused: bool,
+    /// The selected line of the diff (index into the file's lines) while it has the focus.
+    pub diff_cursor: usize,
     pub popup: Option<Popup>,
     /// Comment being written. Kept when the popup is closed, cleared once it is posted.
     pub draft: String,
+    /// What the comment being written answers; `None` for a general comment.
+    pub comment_target: Option<CommentTarget>,
     /// Set while an action runs ("approving…"); other actions wait for it.
     pub busy: Option<&'static str>,
     /// The Pipelines section. Loaded the first time the section is opened.
@@ -97,8 +101,10 @@ impl DetailState {
             selected_file: 0,
             scroll: 0,
             diff_focused: false,
+            diff_cursor: 0,
             popup: None,
             draft: String::new(),
+            comment_target: None,
             busy: None,
             ci: CiState::new(
                 CiSource::MergeRequest {
@@ -145,7 +151,9 @@ fn busy_label(action: &MrAction) -> &'static str {
     match action {
         MrAction::Approve => "approving…",
         MrAction::Unapprove => "removing approval…",
-        MrAction::Comment(_) => "posting comment…",
+        MrAction::Comment(_) | MrAction::LineComment { .. } | MrAction::Reply { .. } => {
+            "posting comment…"
+        }
         MrAction::Merge { .. } => "merging…",
     }
 }
@@ -156,6 +164,10 @@ pub(super) fn success_message(action: &MrAction, reference: &str) -> String {
         MrAction::Approve => format!("Approved {reference}"),
         MrAction::Unapprove => format!("Removed your approval from {reference}"),
         MrAction::Comment(_) => format!("Comment posted on {reference}"),
+        MrAction::LineComment { position, .. } => {
+            format!("Comment posted on {}", position.label())
+        }
+        MrAction::Reply { label, .. } => format!("Reply posted on {label}"),
         MrAction::Merge { .. } => format!("Merged {reference}"),
     }
 }
@@ -165,42 +177,140 @@ pub(super) fn success_message(action: &MrAction, reference: &str) -> String {
 ///
 /// The list has the focus at first: `j`/`k` pick a file. `Enter`, `l` or `→` move the focus
 /// to the diff, where `j`/`k` scroll; `h`, `←` or `Esc` go back to the list.
-pub(super) fn file_browser_action(
-    action: &Action,
-    selected: &mut usize,
-    scroll: &mut u16,
-    diff_focused: &mut bool,
-    file_count: usize,
-) -> bool {
+/// A comment written from the diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommentTarget {
+    /// A new thread on a line.
+    Line(LinePosition),
+    /// A reply in the thread already on the line.
+    Reply {
+        discussion: String,
+        /// `@hoang on src/a.rs:21`, for the popup.
+        label: String,
+        /// `src/a.rs:21`, for the success message.
+        line: String,
+    },
+}
+
+impl CommentTarget {
+    /// The popup's title: `Comment on src/a.rs:21` or `Reply to @hoang on src/a.rs:21`.
+    pub fn title(&self) -> String {
+        match self {
+            Self::Line(position) => format!("Comment on {}", position.label()),
+            Self::Reply { label, .. } => format!("Reply to {label}"),
+        }
+    }
+}
+
+/// The file list and diff state of a screen, for `file_browser_action`.
+pub(super) struct FileBrowser<'a> {
+    pub selected: &'a mut usize,
+    pub scroll: &'a mut u16,
+    pub diff_focused: &'a mut bool,
+    /// The selected diff line while the diff has the focus.
+    pub cursor: &'a mut usize,
+    pub file_count: usize,
+    /// Lines of the selected file's diff.
+    pub line_count: usize,
+}
+
+/// A file list next to the selected file's diff, as on the Files section and a branch
+/// comparison. Returns `false` for actions it does not handle.
+///
+/// The list has the focus at first: `j`/`k` pick a file and `J`/`K` scroll the diff. `Enter`,
+/// `l` or `→` move the focus to the diff, where a line cursor appears and `j`/`k` (and
+/// `J`/`K`, `Ctrl+d`/`Ctrl+u`) move it; `h`, `←` or `Esc` go back to the list.
+pub(super) fn file_browser_action(action: &Action, files: FileBrowser) -> bool {
+    let FileBrowser {
+        selected,
+        scroll,
+        diff_focused,
+        cursor,
+        file_count,
+        line_count,
+    } = files;
+    let last_line = line_count.saturating_sub(1);
+    let move_cursor = |cursor: &mut usize, down: bool, lines: usize| {
+        *cursor = if down {
+            (*cursor + lines).min(last_line)
+        } else {
+            cursor.saturating_sub(lines)
+        };
+    };
+    let pick = |selected: &mut usize, cursor: &mut usize, scroll: &mut u16, index: usize| {
+        if *selected != index {
+            *selected = index;
+            *cursor = 0;
+            *scroll = 0;
+        }
+    };
     match action {
         Action::FocusContent if file_count > 0 => *diff_focused = true,
         Action::FocusList => *diff_focused = false,
         // `Esc` leaves the diff before it leaves the screen.
         Action::CloseDetail if *diff_focused => *diff_focused = false,
         Action::SelectFile(index) if *index < file_count => {
-            if *selected != *index {
-                *selected = *index;
-                *scroll = 0;
-            }
+            pick(selected, cursor, scroll, *index);
             *diff_focused = false;
         }
-        Action::SelectNext if *diff_focused => *scroll = scroll.saturating_add(1),
-        Action::SelectPrevious if *diff_focused => *scroll = scroll.saturating_sub(1),
-        Action::SelectNext => {
-            if *selected + 1 < file_count {
-                *selected += 1;
-                *scroll = 0;
-            }
+        Action::SelectNext if *diff_focused => move_cursor(cursor, true, 1),
+        Action::SelectPrevious if *diff_focused => move_cursor(cursor, false, 1),
+        Action::ScrollDown(lines) if *diff_focused => {
+            move_cursor(cursor, true, usize::from(*lines))
         }
-        Action::SelectPrevious => {
-            if *selected > 0 {
-                *selected -= 1;
-                *scroll = 0;
-            }
+        Action::ScrollUp(lines) if *diff_focused => move_cursor(cursor, false, usize::from(*lines)),
+        Action::SelectNext if *selected + 1 < file_count => {
+            pick(selected, cursor, scroll, *selected + 1);
         }
+        Action::SelectPrevious if *selected > 0 => pick(selected, cursor, scroll, *selected - 1),
+        Action::SelectNext | Action::SelectPrevious => {}
         _ => return false,
     }
     true
+}
+
+/// What `c` on the diff line under the cursor writes: a reply if the line already has a
+/// thread (the latest one), otherwise a new thread. `Err` says why there cannot be one.
+fn comment_target(detail: &DetailState) -> Result<CommentTarget, String> {
+    let loaded = detail.detail.as_ref().ok_or("Still loading…")?;
+    let file = detail.selected_file().ok_or("No file selected")?;
+    let line = file
+        .lines
+        .get(detail.diff_cursor)
+        .ok_or("Move to a line of the diff first")?;
+    let not_a_line = "Pick an added, removed or unchanged line (not a @@ header) to comment on it";
+    let thread = loaded
+        .discussions
+        .iter()
+        .rev()
+        .find(|d| d.position().is_some_and(|p| p.is_on(file, line)));
+    let Some(thread) = thread else {
+        let refs = loaded
+            .diff_refs
+            .as_ref()
+            .ok_or("The server has not finished preparing this diff; press r in a moment")?;
+        return LinePosition::for_line(file, line, refs)
+            .map(CommentTarget::Line)
+            .ok_or_else(|| not_a_line.to_string());
+    };
+    // A reply needs no commits, only the thread; the position is for the labels.
+    let refs = crate::forge::DiffRefs {
+        base_sha: None,
+        start_sha: None,
+        head_sha: String::new(),
+    };
+    let place = LinePosition::for_line(file, line, &refs)
+        .ok_or(not_a_line)?
+        .label();
+    let author = thread
+        .notes
+        .first()
+        .map_or_else(String::new, |n| format!("@{} on ", n.author.username));
+    Ok(CommentTarget::Reply {
+        discussion: thread.id.clone(),
+        label: format!("{author}{place}"),
+        line: place,
+    })
 }
 
 /// Handles user actions while the detail screen is open.
@@ -235,14 +345,16 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Option<Command> {
     }
 
     if detail.section == Section::Files {
-        let count = detail.file_count();
-        if file_browser_action(
-            &action,
-            &mut detail.selected_file,
-            &mut detail.scroll,
-            &mut detail.diff_focused,
-            count,
-        ) {
+        let line_count = detail.selected_file().map_or(0, |f| f.lines.len());
+        let files = FileBrowser {
+            file_count: detail.file_count(),
+            line_count,
+            selected: &mut detail.selected_file,
+            scroll: &mut detail.scroll,
+            diff_focused: &mut detail.diff_focused,
+            cursor: &mut detail.diff_cursor,
+        };
+        if file_browser_action(&action, files) {
             return None;
         }
     }
@@ -299,7 +411,20 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Option<Command> {
             };
             return Some(detail.start_action(action));
         }
-        Action::StartComment => detail.popup = Some(Popup::Comment),
+        Action::StartComment => {
+            // In the diff, the comment is about the line under the cursor.
+            detail.comment_target = None;
+            if detail.section == Section::Files && detail.diff_focused {
+                match comment_target(detail) {
+                    Ok(target) => detail.comment_target = Some(target),
+                    Err(message) => {
+                        state.notice = Some(Notice::error(message));
+                        return None;
+                    }
+                }
+            }
+            detail.popup = Some(Popup::Comment);
+        }
         Action::CommentInput(c) => detail.draft.push(c),
         Action::CommentNewline => detail.draft.push('\n'),
         Action::CommentBackspace => {
@@ -311,7 +436,18 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Option<Command> {
                 state.notice = Some(Notice::error("Write something first"));
                 return None;
             }
-            let action = MrAction::Comment(body.to_string());
+            let body = body.to_string();
+            let action = match detail.comment_target.clone() {
+                Some(CommentTarget::Line(position)) => MrAction::LineComment { body, position },
+                Some(CommentTarget::Reply {
+                    discussion, line, ..
+                }) => MrAction::Reply {
+                    body,
+                    discussion,
+                    label: line,
+                },
+                None => MrAction::Comment(body),
+            };
             detail.popup = None;
             return Some(detail.start_action(action));
         }
@@ -348,7 +484,7 @@ pub(super) fn update(state: &mut AppState, action: Action) -> Option<Command> {
 mod tests {
     use super::*;
     use crate::app::update;
-    use crate::forge::{ApiError, Approvals, MrPage, User};
+    use crate::forge::{ApiError, Approvals, DiffRefs, MrPage, User};
     use chrono::Utc;
 
     fn user(name: &str) -> User {
@@ -382,9 +518,12 @@ mod tests {
             deleted_file: false,
             renamed_file: false,
             too_large: false,
-            lines: vec![],
-            added: 0,
-            removed: 0,
+            // Header, unchanged line 1, removed old line 2, added new lines 2 and 3.
+            lines: crate::forge::diff::parse_unified_diff(
+                "@@ -1,2 +1,3 @@\n keep\n-old\n+new\n+more\n",
+            ),
+            added: 2,
+            removed: 1,
         }
     }
 
@@ -400,6 +539,11 @@ mod tests {
             target_branch: "main".into(),
             web_url: "https://gitlab.com/group/api/-/merge_requests/42".into(),
             sha: Some("abc123".into()),
+            diff_refs: Some(DiffRefs {
+                base_sha: Some("base1".into()),
+                start_sha: Some("start1".into()),
+                head_sha: "abc123".into(),
+            }),
             merge_status: Some("mergeable".into()),
             has_conflicts: false,
             can_merge,
@@ -516,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_moves_the_focus_to_the_diff_so_j_and_k_scroll_it() {
+    fn enter_moves_the_focus_to_the_diff_so_j_and_k_move_a_line_cursor() {
         let mut state = open(loaded_detail(can_approve(), true));
         update(&mut state, Action::NextSection);
         update(&mut state, Action::FocusContent);
@@ -524,7 +668,10 @@ mod tests {
         update(&mut state, Action::SelectNext);
         update(&mut state, Action::SelectNext);
         assert_eq!(detail(&state).selected_file, 0, "still the first file");
-        assert_eq!(detail(&state).scroll, 2, "the diff scrolled instead");
+        assert_eq!(detail(&state).diff_cursor, 2, "the cursor moved instead");
+        // It stops at the last line.
+        update(&mut state, Action::ScrollDown(10));
+        assert_eq!(detail(&state).diff_cursor, 4);
 
         // Esc leaves the diff first, then the screen.
         update(&mut state, Action::CloseDetail);
@@ -532,7 +679,11 @@ mod tests {
         assert!(!detail(&state).diff_focused);
         update(&mut state, Action::SelectNext);
         assert_eq!(detail(&state).selected_file, 1);
-        assert_eq!(detail(&state).scroll, 0, "a new file starts at the top");
+        assert_eq!(
+            detail(&state).diff_cursor,
+            0,
+            "a new file starts at the top"
+        );
 
         // A click on a file focuses the list again.
         update(&mut state, Action::FocusContent);
@@ -548,6 +699,113 @@ mod tests {
         assert!(!detail(&state).diff_focused);
         update(&mut state, Action::CloseDetail);
         assert!(state.detail.is_none());
+    }
+
+    #[test]
+    fn c_in_the_diff_comments_on_the_line_under_the_cursor() {
+        let mut state = open(loaded_detail(can_approve(), true));
+        update(&mut state, Action::NextSection);
+        update(&mut state, Action::FocusContent);
+
+        // The `@@` header cannot take a comment.
+        update(&mut state, Action::StartComment);
+        assert!(detail(&state).popup.is_none());
+        assert!(
+            state
+                .notice
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("not a @@ header")
+        );
+
+        // An unchanged line: both line numbers.
+        update(&mut state, Action::SelectNext);
+        update(&mut state, Action::StartComment);
+        let Some(CommentTarget::Line(target)) = detail(&state).comment_target.clone() else {
+            panic!("expected a new thread on the line");
+        };
+        assert_eq!((target.old_line, target.new_line), (Some(1), Some(1)));
+        update(&mut state, Action::ClosePopup);
+
+        // An added line: the new line only, and the commits of the diff.
+        update(&mut state, Action::ScrollDown(2));
+        update(&mut state, Action::StartComment);
+        assert_eq!(state.key_context(), crate::app::KeyContext::CommentEditor);
+        for c in "Typo".chars() {
+            update(&mut state, Action::CommentInput(c));
+        }
+        let command = update(&mut state, Action::SubmitComment);
+        let Some(Command::RunMrAction {
+            action: MrAction::LineComment { body, position },
+            ..
+        }) = command
+        else {
+            panic!("expected a line comment, got {command:?}");
+        };
+        assert_eq!(body, "Typo");
+        assert_eq!((position.old_line, position.new_line), (None, Some(2)));
+        assert_eq!(position.new_path, "a.rs");
+        assert_eq!(position.refs.head_sha, "abc123");
+        assert_eq!(position.refs.base_sha.as_deref(), Some("base1"));
+        assert_eq!(position.label(), "a.rs:2");
+
+        let action = MrAction::LineComment { body, position };
+        finish(&mut state, action, Ok(()));
+        assert!(detail(&state).draft.is_empty());
+        assert!(detail(&state).comment_target.is_none());
+        assert!(state.notice.as_ref().unwrap().text.contains("a.rs:2"));
+    }
+
+    #[test]
+    fn c_on_a_line_with_a_thread_replies_to_it() {
+        let mut loaded = loaded_detail(can_approve(), true);
+        let mut note: crate::forge::Note = serde_json::from_value(serde_json::json!({
+            "id": 9, "body": "Why?", "author": {"username": "hoang", "name": "Hoang"},
+            "created_at": "2026-10-10T08:00:00Z",
+            "position": {"new_path": "a.rs", "new_line": 2, "old_line": null}
+        }))
+        .unwrap();
+        note.system = false;
+        loaded.discussions = vec![crate::forge::Discussion {
+            id: "d42".into(),
+            notes: vec![note],
+        }];
+        let mut state = open(loaded);
+        update(&mut state, Action::NextSection);
+        update(&mut state, Action::FocusContent);
+        update(&mut state, Action::ScrollDown(3)); // the added line 2
+        update(&mut state, Action::StartComment);
+        let target = detail(&state).comment_target.clone().unwrap();
+        assert_eq!(target.title(), "Reply to @hoang on a.rs:2");
+        update(&mut state, Action::CommentInput('k'));
+        let command = update(&mut state, Action::SubmitComment);
+        assert!(
+            matches!(
+                &command,
+                Some(Command::RunMrAction {
+                    action: MrAction::Reply { discussion, label, body },
+                    ..
+                }) if discussion == "d42" && label == "a.rs:2" && body == "k"
+            ),
+            "{command:?}"
+        );
+    }
+
+    #[test]
+    fn c_outside_the_diff_is_a_general_comment() {
+        let mut state = open(loaded_detail(can_approve(), true));
+        update(&mut state, Action::NextSection);
+        update(&mut state, Action::StartComment);
+        assert!(detail(&state).comment_target.is_none());
+        update(&mut state, Action::CommentInput('x'));
+        assert!(matches!(
+            update(&mut state, Action::SubmitComment),
+            Some(Command::RunMrAction {
+                action: MrAction::Comment(_),
+                ..
+            })
+        ));
     }
 
     #[test]

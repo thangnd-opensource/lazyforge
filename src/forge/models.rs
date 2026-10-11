@@ -108,6 +108,8 @@ pub struct MrDetail {
     /// Head commit of the source branch. Sent with merge requests so GitLab refuses to merge
     /// if someone pushed after we loaded the page.
     pub sha: Option<String>,
+    /// The commits the diff is between, for comments on its lines.
+    pub diff_refs: Option<DiffRefs>,
     /// For example `mergeable`, `not_approved`, `ci_still_running`, `conflict`.
     pub merge_status: Option<String>,
     pub has_conflicts: bool,
@@ -169,8 +171,46 @@ pub struct Note {
 #[derive(Debug, Clone, Deserialize)]
 pub struct NotePosition {
     pub new_path: Option<String>,
+    #[serde(default)]
+    pub old_path: Option<String>,
+    /// Set for comments on added and unchanged lines.
     pub new_line: Option<u32>,
+    /// Set for comments on removed (and, on GitLab, unchanged) lines.
     pub old_line: Option<u32>,
+    /// The line is no longer in the diff (the branch changed since). Such a comment is
+    /// listed under Discussion but not placed on a line of the diff.
+    #[serde(default)]
+    pub outdated: bool,
+}
+
+impl NotePosition {
+    /// Whether this comment is about `line` of `file` in the current diff.
+    pub fn is_on(&self, file: &FileDiff, line: &super::diff::DiffLine) -> bool {
+        use super::diff::DiffLineKind;
+        let path_matches = [self.new_path.as_deref(), self.old_path.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|path| path == file.new_path || path == file.old_path);
+        if self.outdated || !path_matches {
+            return false;
+        }
+        match (self.new_line, line.kind) {
+            // On the new side: an added or unchanged line with that number.
+            (Some(new), DiffLineKind::Added | DiffLineKind::Context) => line.new_line == Some(new),
+            // Only an old line: a removed line.
+            (None, DiffLineKind::Removed) => {
+                self.old_line.is_some() && line.old_line == self.old_line
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Discussion {
+    /// The position of a thread on a diff line (its first comment's), if it is one.
+    pub fn position(&self) -> Option<&NotePosition> {
+        self.notes.first()?.position.as_ref()
+    }
 }
 
 /// Something the user can do to a merge request.
@@ -179,10 +219,78 @@ pub enum MrAction {
     Approve,
     Unapprove,
     Comment(String),
+    /// A comment on one line of the diff.
+    LineComment {
+        body: String,
+        position: LinePosition,
+    },
+    /// A reply in a thread on a diff line.
+    Reply {
+        body: String,
+        /// `Discussion::id`.
+        discussion: String,
+        /// Where the thread is, for messages: `src/a.rs:21`.
+        label: String,
+    },
     /// `sha`: the head commit the user reviewed (see `MrDetail::sha`).
     Merge {
         sha: Option<String>,
     },
+}
+
+/// The commits a merge request's diff is between. GitLab needs all three to place a line
+/// comment; GitHub only the head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffRefs {
+    pub base_sha: Option<String>,
+    pub start_sha: Option<String>,
+    pub head_sha: String,
+}
+
+/// Where a line comment goes: one line of one file of the diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinePosition {
+    pub old_path: String,
+    pub new_path: String,
+    /// Set for removed and unchanged lines.
+    pub old_line: Option<u32>,
+    /// Set for added and unchanged lines.
+    pub new_line: Option<u32>,
+    pub refs: DiffRefs,
+}
+
+impl LinePosition {
+    /// `None` for lines that cannot take a comment: `@@` headers and notes such as
+    /// `\ No newline at end of file`.
+    pub fn for_line(
+        file: &FileDiff,
+        line: &super::diff::DiffLine,
+        refs: &DiffRefs,
+    ) -> Option<Self> {
+        use super::diff::DiffLineKind;
+        if !matches!(
+            line.kind,
+            DiffLineKind::Added | DiffLineKind::Removed | DiffLineKind::Context
+        ) {
+            return None;
+        }
+        Some(Self {
+            old_path: file.old_path.clone(),
+            new_path: file.new_path.clone(),
+            old_line: line.old_line,
+            new_line: line.new_line,
+            refs: refs.clone(),
+        })
+    }
+
+    /// The line in the new file when it has one (added or unchanged), else in the old one.
+    pub fn label(&self) -> String {
+        match (self.new_line, self.old_line) {
+            (Some(line), _) => format!("{}:{line}", self.new_path),
+            (None, Some(line)) => format!("{}:{line} (removed)", self.old_path),
+            (None, None) => self.new_path.clone(),
+        }
+    }
 }
 
 /// A repository (GitHub) or project (GitLab), for the repository picker.
@@ -386,6 +494,63 @@ pub fn sort_jobs(jobs: &mut [Job]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn diff_file() -> FileDiff {
+        FileDiff {
+            old_path: "src/a.rs".into(),
+            new_path: "src/a.rs".into(),
+            new_file: false,
+            deleted_file: false,
+            renamed_file: false,
+            too_large: false,
+            // [0] header, [1] unchanged 1/1, [2] removed old 2, [3] added new 2
+            lines: super::super::diff::parse_unified_diff("@@ -1,2 +1,2 @@\n keep\n-old\n+new\n"),
+            added: 1,
+            removed: 1,
+        }
+    }
+
+    fn at(new_line: Option<u32>, old_line: Option<u32>) -> NotePosition {
+        NotePosition {
+            new_path: Some("src/a.rs".into()),
+            old_path: None,
+            new_line,
+            old_line,
+            outdated: false,
+        }
+    }
+
+    #[test]
+    fn threads_are_placed_on_their_line() {
+        let file = diff_file();
+        let on = |position: &NotePosition| -> Vec<usize> {
+            (0..file.lines.len())
+                .filter(|&i| position.is_on(&file, &file.lines[i]))
+                .collect()
+        };
+        assert_eq!(
+            on(&at(Some(1), Some(1))),
+            [1],
+            "unchanged line (GitLab: both numbers)"
+        );
+        assert_eq!(on(&at(Some(1), None)), [1], "unchanged line (GitHub RIGHT)");
+        assert_eq!(
+            on(&at(Some(2), None)),
+            [3],
+            "added line, not the removed one"
+        );
+        assert_eq!(on(&at(None, Some(2))), [2], "removed line");
+        let outdated = NotePosition {
+            outdated: true,
+            ..at(Some(2), None)
+        };
+        assert!(on(&outdated).is_empty(), "outdated threads are not placed");
+        let elsewhere = NotePosition {
+            new_path: Some("src/b.rs".into()),
+            ..at(Some(1), None)
+        };
+        assert!(on(&elsewhere).is_empty());
+    }
 
     fn job(id: u64, stage: &str) -> Job {
         Job {

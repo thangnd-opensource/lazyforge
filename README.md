@@ -102,12 +102,14 @@ Tabs: the chosen repository (when there is one), **Assigned**, **Review requeste
 |---|---|
 | `[` / `]` | Section: Overview, Files, Discussion, Pipelines (Actions) |
 | `j` / `k` | Files: next / previous file. Elsewhere: scroll |
-| `Enter` / `l` / `→` | Files: move the focus to the diff (its border turns green), so `j` / `k` scroll it |
+| `Enter` / `l` / `→` | Files: move the focus to the diff (its border turns green); `j` / `k` then move a line cursor |
 | `h` / `←` / `Esc` | Files: back to the file list |
 | `J` / `K`, `Ctrl+d` / `Ctrl+u`, `Space` | Scroll the diff or text |
 | `a` | Approve, or remove your approval (GitLab only: on GitHub, dismiss your review on the web) |
-| `c` | Write a comment: `Ctrl+S` sends it, `Esc` closes and keeps the draft |
+| `c` | Write a comment: `Ctrl+S` sends it, `Esc` closes and keeps the draft. In the diff, the comment goes on the line under the cursor (added, removed or unchanged), or replies to the thread already on that line |
 | `m` | Merge, after a confirmation (`y`) |
+
+Threads on diff lines appear right below their line, with a yellow bar. Comments on lines that are no longer in the diff (the branch changed since) are listed under Discussion only.
 
 Merging sends the commit you were looking at, so the server refuses the merge if someone pushed in the meantime. On GitHub, lazyforge picks a merge method the repository allows.
 

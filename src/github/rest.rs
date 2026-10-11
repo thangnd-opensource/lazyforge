@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::forge::diff::{DiffLineKind, parse_unified_diff};
 use crate::forge::{
-    Approvals, Discussion, FileDiff, MrDetail, Note, NotePosition, PipelineStatus, User,
+    Approvals, DiffRefs, Discussion, FileDiff, MrDetail, Note, NotePosition, PipelineStatus, User,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +94,8 @@ pub(crate) struct RawReviewComment {
     /// `null` when the line is no longer in the diff (outdated comment).
     pub line: Option<u32>,
     pub original_line: Option<u32>,
+    /// `RIGHT` (the new file: added and unchanged lines) or `LEFT` (the old file).
+    pub side: Option<String>,
     /// Replies point at the first comment of their thread.
     pub in_reply_to_id: Option<u64>,
 }
@@ -191,6 +193,12 @@ pub(crate) fn into_detail(raw: RawDetail) -> MrDetail {
         source_branch: pull.head.name,
         target_branch: pull.base.name,
         web_url: pull.html_url,
+        // GitHub places line comments with the head commit alone.
+        diff_refs: Some(DiffRefs {
+            head_sha: pull.head.sha.clone(),
+            base_sha: Some(pull.base.sha.clone()),
+            start_sha: None,
+        }),
         sha: Some(pull.head.sha),
         merge_status,
         has_conflicts,
@@ -332,10 +340,23 @@ fn discussions(
             login(comment.user),
             comment.created_at,
         );
-        item.position = Some(NotePosition {
-            new_path: Some(comment.path),
-            new_line: comment.line,
-            old_line: comment.original_line,
+        let left = comment.side.as_deref() == Some("LEFT");
+        item.position = Some(match comment.line {
+            Some(line) => NotePosition {
+                new_path: Some(comment.path),
+                old_path: None,
+                new_line: (!left).then_some(line),
+                old_line: left.then_some(line),
+                outdated: false,
+            },
+            // No longer in the diff: keep the line it was written on, for the label only.
+            None => NotePosition {
+                new_path: Some(comment.path),
+                old_path: None,
+                new_line: comment.original_line,
+                old_line: None,
+                outdated: true,
+            },
         });
         let index = match thread {
             Some(index) => {
@@ -385,6 +406,39 @@ mod tests {
         assert!(a.user_can_approve);
         // Authors cannot approve their own pull request.
         assert!(!approvals(&reviews, "linh", "linh", "opened").user_can_approve);
+    }
+
+    #[test]
+    fn line_comments_keep_their_side() {
+        let comment = |id: u64, line: Option<u32>, side: &str| -> RawReviewComment {
+            serde_json::from_value(json!({
+                "id": id, "body": "b", "user": {"login": "hoang"},
+                "created_at": "2026-10-10T09:00:00Z", "path": "src/lib.rs",
+                "line": line, "original_line": 30, "side": side, "in_reply_to_id": null
+            }))
+            .unwrap()
+        };
+        let threads = discussions(
+            vec![],
+            vec![],
+            vec![
+                comment(1, Some(12), "RIGHT"),
+                comment(2, Some(7), "LEFT"),
+                comment(3, None, "RIGHT"),
+            ],
+        );
+        let position = |i: usize| threads[i].position().unwrap().clone();
+        assert_eq!(
+            (position(0).new_line, position(0).old_line),
+            (Some(12), None)
+        );
+        assert_eq!(
+            (position(1).new_line, position(1).old_line),
+            (None, Some(7))
+        );
+        // No longer in the diff: listed with the line it was written on, but not placed.
+        assert!(position(2).outdated);
+        assert_eq!(position(2).new_line, Some(30));
     }
 
     #[test]

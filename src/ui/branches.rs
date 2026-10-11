@@ -200,10 +200,13 @@ pub(super) fn render_screen(
     detail::render_files(
         frame,
         body,
-        &comparison.files,
-        screen.selected_file,
-        screen.scroll,
-        screen.diff_focused,
+        detail::FilesPane {
+            files: &comparison.files,
+            discussions: &[],
+            selected: screen.selected_file,
+            scroll: screen.scroll,
+            cursor: screen.diff_focused.then_some(screen.diff_cursor),
+        },
         view,
     );
 }

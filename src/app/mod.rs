@@ -816,8 +816,14 @@ fn handle_event(state: &mut AppState, action: Action) -> Option<Command> {
                     state.notice = Some(Notice::info(detail::success_message(&action, &reference)));
                     if let Some(detail) = detail {
                         detail.busy = None;
-                        if matches!(action, MrAction::Comment(_)) {
+                        if matches!(
+                            action,
+                            MrAction::Comment(_)
+                                | MrAction::LineComment { .. }
+                                | MrAction::Reply { .. }
+                        ) {
                             detail.draft.clear();
+                            detail.comment_target = None;
                         }
                         return Some(detail.fetch(&mut state.next_request_id));
                     }
